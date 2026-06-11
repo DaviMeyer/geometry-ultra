@@ -1,0 +1,73 @@
+rules_version = '2';
+
+// ===========================================================================
+// Firestore-Sicherheitsregeln für Geometry Ultra
+//
+// Grundprinzip:
+//   - Bestenlisten sind ÖFFENTLICH lesbar (jeder sieht die Top-Scores).
+//   - Schreiben darf jeder nur für sich selbst (request.auth.uid muss passen).
+//   - Einfache Typ-/Größenvalidierung gegen offensichtlichen Unsinn.
+//   - Der Tages-Geist darf nur überschrieben werden, wenn der neue Score höher ist.
+//
+// Hinweis: Echter Cheat-Schutz (unrealistische Scores) wäre nur mit Server-Code
+// (Cloud Functions) wasserdicht. Diese Regeln verhindern aber, dass jemand
+// FREMDE Einträge schreibt/überschreibt.
+//
+// EINSETZEN: Firebase-Console -> Firestore Database -> Tab "Regeln" ->
+// diesen Inhalt einfügen -> "Veröffentlichen".
+// ===========================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -- Hilfsfunktionen --
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+    function validScore(data) {
+      return data.score is number
+          && data.score >= 0
+          && data.score <= 100000000
+          && data.displayName is string
+          && data.displayName.size() <= 64;
+    }
+
+    // -- Globale Bestenliste (ein Dokument pro Nutzer, Doc-ID = uid) --
+    match /scores/{userId} {
+      allow read: if true;
+      allow write: if isOwner(userId)
+                   && request.resource.data.uid == userId
+                   && validScore(request.resource.data);
+    }
+
+    // -- Tages-Challenge-Scores: dailyScores/<seed>/entries/<uid> --
+    match /dailyScores/{seed}/entries/{userId} {
+      allow read: if true;
+      allow write: if isOwner(userId)
+                   && request.resource.data.uid == userId
+                   && validScore(request.resource.data);
+    }
+
+    // -- Tages-Geist: ein Dokument pro Seed (Doc-ID = seed), nur der Beste --
+    match /dailyGhosts/{seed} {
+      allow read: if true;
+      // erstmaliges Anlegen
+      allow create: if signedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.score is number
+                    && request.resource.data.score >= 0;
+      // überschreiben nur mit höherem Score
+      allow update: if signedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.score > resource.data.score;
+    }
+
+    // -- Alles andere ist gesperrt --
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
