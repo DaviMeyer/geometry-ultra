@@ -5,7 +5,39 @@
     "rooms": {
       "$roomId": {
         ".read": "auth != null",
-        ".write": "auth != null"
+
+        ".write": "auth != null && !data.exists() && newData.child('meta').child('host').val() === auth.uid",
+
+        "meta": {
+          ".write": "auth != null && data.child('host').val() === auth.uid",
+          "host": { ".validate": "newData.val() === auth.uid || newData.val() === data.val()" },
+          "seed": { ".validate": "newData.isNumber()" },
+          "state": { ".validate": "newData.val() === 'lobby' || newData.val() === 'countdown'" },
+          "startAt": { ".validate": "!newData.exists() || newData.isNumber()" },
+          "collision": { ".validate": "newData.isBoolean()" },
+          "createdAt": { ".validate": true },
+          "$other": { ".validate": false }
+        },
+
+        "players": {
+          "$uid": {
+            ".write": "auth != null && ($uid === auth.uid || data.parent().parent().child('meta').child('host').val() === auth.uid)",
+            "uid": { ".validate": "newData.val() === $uid" },
+            "name": { ".validate": "newData.isString() && newData.val().length <= 80" },
+            "photoURL": { ".validate": "newData.val() === null || (newData.isString() && newData.val().length <= 300 && newData.val().beginsWith('https://'))" },
+            "ready": { ".validate": "newData.isBoolean()" },
+            "x": { ".validate": "newData.isNumber()" },
+            "y": { ".validate": "newData.isNumber()" },
+            "z": { ".validate": "newData.isNumber()" },
+            "alive": { ".validate": "newData.isBoolean()" },
+            "score": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000000" },
+            "finished": { ".validate": "newData.isBoolean()" },
+            "finalScore": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000000" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        "$other": { ".validate": false }
       }
     }
   }

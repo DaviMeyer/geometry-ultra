@@ -1,17 +1,17 @@
 rules_version = '2';
 
 // ===========================================================================
-// Firestore-Sicherheitsregeln für Geometry Ultra
+// Firestore-Sicherheitsregeln für Geometry Ultra (gehärtete Fassung)
 //
 // Grundprinzip:
-//   - Bestenlisten sind ÖFFENTLICH lesbar (jeder sieht die Top-Scores).
-//   - Schreiben darf jeder nur für sich selbst (request.auth.uid muss passen).
-//   - Einfache Typ-/Größenvalidierung gegen offensichtlichen Unsinn.
-//   - Der Tages-Geist darf nur überschrieben werden, wenn der neue Score höher ist.
+//   - Bestenlisten sind ÖFFENTLICH lesbar.
+//   - Schreiben nur für sich selbst (request.auth.uid muss passen).
+//   - Strikte Typ-/Größen-/Wertevalidierung (inkl. photoURL = nur https).
+//   - Scores können nur STEIGEN (nur-höher-Update), nicht abgesenkt werden.
+//   - Realistischer Score-Deckel statt 100 Mio.
 //
-// Hinweis: Echter Cheat-Schutz (unrealistische Scores) wäre nur mit Server-Code
-// (Cloud Functions) wasserdicht. Diese Regeln verhindern aber, dass jemand
-// FREMDE Einträge schreibt/überschreibt.
+// Hinweis: Wasserdichter Cheat-Schutz bräuchte Cloud Functions; diese Regeln
+// verhindern Fremd-Schreibzugriff und grob unrealistische / fehlerhafte Daten.
 //
 // EINSETZEN: Firebase-Console -> Firestore Database -> Tab "Regeln" ->
 // diesen Inhalt einfügen -> "Veröffentlichen".
@@ -27,41 +27,68 @@ service cloud.firestore {
     function isOwner(uid) {
       return signedIn() && request.auth.uid == uid;
     }
+    // Realistischer Höchstwert (selbst sehr lange Läufe bleiben weit darunter).
+    function maxScore() {
+      return 5000000;
+    }
+    function validPhoto(data) {
+      return !('photoURL' in data) || data.photoURL == null
+          || (data.photoURL is string && data.photoURL.size() <= 300 && data.photoURL.matches('https://.*'));
+    }
     function validScore(data) {
       return data.score is number
           && data.score >= 0
-          && data.score <= 100000000
+          && data.score <= maxScore()
           && data.displayName is string
-          && data.displayName.size() <= 64;
+          && data.displayName.size() <= 64
+          && validPhoto(data);
+    }
+    function validGhost(data) {
+      return data.score is number
+          && data.score >= 0
+          && data.score <= maxScore()
+          && data.name is string
+          && data.name.size() <= 64
+          && data.xs is list && data.xs.size() <= 6000
+          && data.ys is list && data.ys.size() <= 6000
+          && data.zs is list && data.zs.size() <= 6000;
     }
 
     // -- Globale Bestenliste (ein Dokument pro Nutzer, Doc-ID = uid) --
     match /scores/{userId} {
       allow read: if true;
-      allow write: if isOwner(userId)
-                   && request.resource.data.uid == userId
-                   && validScore(request.resource.data);
+      allow create: if isOwner(userId)
+                    && request.resource.data.uid == userId
+                    && validScore(request.resource.data);
+      // Update nur mit gleichem oder höherem Score (kein Absenken)
+      allow update: if isOwner(userId)
+                    && request.resource.data.uid == userId
+                    && validScore(request.resource.data)
+                    && request.resource.data.score >= resource.data.score;
     }
 
     // -- Tages-Challenge-Scores: dailyScores/<seed>/entries/<uid> --
     match /dailyScores/{seed}/entries/{userId} {
       allow read: if true;
-      allow write: if isOwner(userId)
-                   && request.resource.data.uid == userId
-                   && validScore(request.resource.data);
+      allow create: if isOwner(userId)
+                    && request.resource.data.uid == userId
+                    && validScore(request.resource.data);
+      allow update: if isOwner(userId)
+                    && request.resource.data.uid == userId
+                    && validScore(request.resource.data)
+                    && request.resource.data.score >= resource.data.score;
     }
 
     // -- Tages-Geist: ein Dokument pro Seed (Doc-ID = seed), nur der Beste --
     match /dailyGhosts/{seed} {
       allow read: if true;
-      // erstmaliges Anlegen
       allow create: if signedIn()
                     && request.resource.data.uid == request.auth.uid
-                    && request.resource.data.score is number
-                    && request.resource.data.score >= 0;
-      // überschreiben nur mit höherem Score
+                    && validGhost(request.resource.data);
+      // überschreiben nur mit höherem Score und weiterhin gültigen Daten
       allow update: if signedIn()
                     && request.resource.data.uid == request.auth.uid
+                    && validGhost(request.resource.data)
                     && request.resource.data.score > resource.data.score;
     }
 
