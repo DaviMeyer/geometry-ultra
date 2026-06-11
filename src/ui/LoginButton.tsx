@@ -4,6 +4,7 @@
 import type { User } from 'firebase/auth'
 import { useState } from 'react'
 import { logout, signInWithGoogle } from '../firebase/auth'
+import { safeAvatarUrl } from './Avatar'
 
 interface LoginButtonProps {
   user: User | null
@@ -25,9 +26,10 @@ export function LoginButton({ user }: LoginButtonProps) {
   }
 
   if (user) {
+    const avatar = safeAvatarUrl(user.photoURL)
     return (
       <div className="user-chip">
-        {user.photoURL && <img src={user.photoURL} alt="" referrerPolicy="no-referrer" />}
+        {avatar && <img src={avatar} alt="" referrerPolicy="no-referrer" />}
         <span className="user-name">{user.displayName ?? 'Spieler'}</span>
         <button className="link-btn" onClick={() => logout()}>
           Abmelden

@@ -4,6 +4,7 @@
 import type { User } from 'firebase/auth'
 import { useEffect, useState } from 'react'
 import type { RoomState } from '../../firebase/multiplayer'
+import { Avatar } from '../Avatar'
 import { LoginButton } from '../LoginButton'
 
 interface LobbyProps {
@@ -113,7 +114,7 @@ export function Lobby(props: LobbyProps) {
       <div className="panel mp-players">
         {players.map((p) => (
           <div key={p.uid} className="mp-player">
-            {p.photoURL ? <img src={p.photoURL} alt="" referrerPolicy="no-referrer" /> : <span className="lb-avatar placeholder" />}
+            <Avatar url={p.photoURL} className="lb-avatar" />
             <span className="mp-player-name">
               {p.name}
               {p.uid === room.meta.host && ' 👑'}

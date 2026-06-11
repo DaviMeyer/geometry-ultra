@@ -5,6 +5,7 @@
 
 import type { User } from 'firebase/auth'
 import type { RoomState } from '../../firebase/multiplayer'
+import { Avatar } from '../Avatar'
 
 interface Props {
   room: RoomState | null
@@ -70,7 +71,7 @@ export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
           {players.map((p, i) => (
             <li key={p.uid} className={`lb-row${p.uid === user?.uid ? ' me' : ''}`}>
               <span className="lb-rank">{i < 3 ? medals[i] : i + 1}</span>
-              {p.photoURL ? <img className="lb-avatar" src={p.photoURL} alt="" referrerPolicy="no-referrer" /> : <span className="lb-avatar placeholder" />}
+              <Avatar url={p.photoURL} className="lb-avatar" />
               <span className="lb-name">{p.name}</span>
               <span className="lb-score">{effScore(p)}</span>
             </li>

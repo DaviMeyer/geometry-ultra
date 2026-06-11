@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from 'react'
 import { fetchDailyTop, fetchTopScores, type ScoreEntry } from '../firebase/scores'
+import { Avatar } from './Avatar'
 
 interface LeaderboardProps {
   mode?: 'global' | 'daily'
@@ -54,7 +55,7 @@ export function Leaderboard({ mode = 'global', seed, refreshKey = 0, highlightUi
           {entries.map((e, i) => (
             <li key={e.uid} className={`lb-row${e.uid === highlightUid ? ' me' : ''}`}>
               <span className="lb-rank">{i + 1}</span>
-              {e.photoURL ? <img className="lb-avatar" src={e.photoURL} alt="" referrerPolicy="no-referrer" /> : <span className="lb-avatar placeholder" />}
+              <Avatar url={e.photoURL} className="lb-avatar" />
               <span className="lb-name">{e.displayName}</span>
               <span className="lb-score">{e.score}</span>
             </li>
