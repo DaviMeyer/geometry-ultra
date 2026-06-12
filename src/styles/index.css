@@ -24,12 +24,24 @@ body,
   background: var(--bg-dark);
   font-family: 'Segoe UI', 'Trebuchet MS', system-ui, sans-serif;
   color: #fff;
+  /* Wischen darf NIE Text markieren: iOS/WebKit brauchen die Präfix-Varianten,
+     das unpräfixte user-select allein reicht dort nicht */
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
   /* Doppeltipp ist Spielmechanik (Doppelsprung) — Doppeltipp-Zoom und
      Pull-to-Refresh des Browsers unterbinden */
   touch-action: manipulation;
   overscroll-behavior: none;
+}
+
+/* Eingabefelder bleiben editierbar — mit -webkit-user-select: none auf den
+   Vorfahren würde iOS sonst die Texteingabe komplett blockieren */
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .canvas-host canvas {

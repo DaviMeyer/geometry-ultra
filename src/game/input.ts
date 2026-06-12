@@ -23,6 +23,11 @@ export class InputManager {
   private touchStartX: number | null = null
   private touchMoved = false
   private touchBoost = false // gehaltener TURBO-Button (Mobile)
+  // Multi-Touch: der ERSTE Finger lenkt/springt, jeder ZUSÄTZLICHE Finger
+  // wirkt als gehaltener Turbo ("zweiter Finger = Gas geben").
+  private steerPointerId: number | null = null
+  private activePointers = new Set<number>()
+  private boostPointers = new Set<number>() // Finger einer 2-Finger-Geste springen beim Loslassen nicht
   private canvas: HTMLElement | null = null
 
   constructor(private cb: InputCallbacks) {}
@@ -64,9 +69,9 @@ export class InputManager {
     return s
   }
 
-  /** Ob der Turbo gerade gehalten wird (Shift oder Touch-Button). */
+  /** Ob der Turbo gerade gehalten wird (Shift, Touch-Button oder zweiter Finger). */
   isBoosting(): boolean {
-    return !!this.keys['shift'] || this.touchBoost
+    return !!this.keys['shift'] || this.touchBoost || this.activePointers.size >= 2
   }
 
   /** Mobile: TURBO-Button wird gehalten/losgelassen. */
@@ -80,6 +85,9 @@ export class InputManager {
     this.touchStartX = null
     this.touchMoved = false
     this.touchBoost = false
+    this.steerPointerId = null
+    this.activePointers.clear()
+    this.boostPointers.clear()
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -105,22 +113,35 @@ export class InputManager {
     this.touchTargetDir = 0
     this.touchStartX = null
     this.touchBoost = false
+    this.steerPointerId = null
+    this.activePointers.clear()
+    this.boostPointers.clear()
   }
 
   private onPointerDown = (e: PointerEvent) => {
-    this.touchStartX = e.clientX
-    this.touchMoved = false
-    this.touchTargetDir = 0
+    this.activePointers.add(e.pointerId)
     // move/up auch außerhalb des Canvas weiterbekommen (Maus zieht raus etc.)
     try {
       ;(e.target as Element | null)?.setPointerCapture?.(e.pointerId)
     } catch {
       // ältere Browser ohne Pointer Capture — unkritisch
     }
+    if (this.steerPointerId === null) {
+      // erster Finger: lenkt und springt
+      this.steerPointerId = e.pointerId
+      this.touchStartX = e.clientX
+      this.touchMoved = false
+      this.touchTargetDir = 0
+    }
+    if (this.activePointers.size >= 2) {
+      // Zwei-Finger-Geste = Turbo: keiner der beteiligten Finger darf beim
+      // Loslassen einen Sprung auslösen
+      for (const id of this.activePointers) this.boostPointers.add(id)
+    }
   }
 
   private onPointerMove = (e: PointerEvent) => {
-    if (this.touchStartX === null) return
+    if (e.pointerId !== this.steerPointerId || this.touchStartX === null) return
     const dx = e.clientX - this.touchStartX
     if (Math.abs(dx) > 20) {
       this.touchMoved = true
@@ -128,17 +149,26 @@ export class InputManager {
     }
   }
 
-  private onPointerUp = () => {
-    if (this.touchStartX !== null && !this.touchMoved) this.cb.onJump() // Tap = Sprung
+  private onPointerUp = (e: PointerEvent) => {
+    const wasBoostFinger = this.boostPointers.delete(e.pointerId)
+    this.activePointers.delete(e.pointerId)
+    if (e.pointerId !== this.steerPointerId) return // Boost-Finger losgelassen — fertig
+    if (this.touchStartX !== null && !this.touchMoved && !wasBoostFinger) this.cb.onJump() // Tap = Sprung
+    this.steerPointerId = null
     this.touchStartX = null
     this.touchTargetDir = 0
   }
 
-  private onPointerCancel = () => {
+  private onPointerCancel = (e: PointerEvent) => {
     // Geste vom Browser/System abgebrochen: KEIN Sprung, Richtung loslassen —
     // sonst driftet der Cube dauerhaft zur Seite.
-    this.touchStartX = null
-    this.touchTargetDir = 0
-    this.touchMoved = false
+    this.boostPointers.delete(e.pointerId)
+    this.activePointers.delete(e.pointerId)
+    if (e.pointerId === this.steerPointerId) {
+      this.steerPointerId = null
+      this.touchStartX = null
+      this.touchTargetDir = 0
+      this.touchMoved = false
+    }
   }
 }

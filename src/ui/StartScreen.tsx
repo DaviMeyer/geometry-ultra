@@ -53,9 +53,9 @@ export function StartScreen({ onStart, onMultiplayer, user, lbRefreshKey, onName
             </span>
             <span>Seitlich lenken (Finger halten)</span>
             <span>
-              <span className="key">⚡ halten</span>
+              <span className="key">✌️ 2. Finger</span>
             </span>
-            <span>Turbo (Button unten rechts im Spiel)</span>
+            <span>Turbo: zweiten Finger aufs Display halten (oder ⚡-Button)</span>
           </div>
         ) : (
           <div className="controls-grid">

@@ -53,7 +53,7 @@ export function HUD({ score, best, speedPct, turboPct, invincibleSec, proximity 
           <div className="hud-bar-track">
             <div className={`hud-bar-fill turbo${turboPct >= 100 ? ' full' : ''}`} style={{ width: `${turboPct}%` }} />
           </div>
-          <div className="hud-bar-label">{IS_TOUCH ? '⚡ TURBO' : '⚡ TURBO (Shift halten)'}</div>
+          <div className="hud-bar-label">{IS_TOUCH ? '⚡ TURBO (2. Finger halten)' : '⚡ TURBO (Shift halten)'}</div>
         </div>
       </div>
 
