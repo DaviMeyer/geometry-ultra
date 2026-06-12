@@ -136,6 +136,20 @@ export class GhostPlayer {
     }
   }
 
+  /**
+   * Position + Name des führenden, noch sichtbaren Geists (für die
+   * Abstandsanzeige). null, wenn kein Geist (mehr) unterwegs ist.
+   */
+  getLeadGhost(): { name?: string; z: number } | null {
+    let best: { name?: string; z: number } | null = null
+    for (let g = 0; g < this.ghosts.length; g++) {
+      const mesh = this.meshes[g]
+      if (!mesh || !mesh.visible) continue
+      if (!best || mesh.position.z < best.z) best = { name: this.ghosts[g].name, z: mesh.position.z }
+    }
+    return best
+  }
+
   /** Stellt die Geister an ihren Startpunkt (Menü/Reset). */
   resetToStart() {
     for (let g = 0; g < this.ghosts.length; g++) {

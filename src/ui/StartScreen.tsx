@@ -2,22 +2,39 @@
 // (Endlos + Tägliche Challenge) und globaler Bestenliste.
 
 import type { User } from 'firebase/auth'
+import { useEffect, useState } from 'react'
+import { dailySeed } from '../game/rng'
 import type { GameMode } from '../game/types'
 import { Leaderboard } from './Leaderboard'
 import { LoginButton } from './LoginButton'
+
+/** Heutiger Tages-Seed, der auch über UTC-Mitternacht hinweg aktuell bleibt. */
+function useDailySeed(): number {
+  const [seed, setSeed] = useState(dailySeed)
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = dailySeed()
+      setSeed((s) => (s === now ? s : now))
+    }, 60_000)
+    return () => clearInterval(id)
+  }, [])
+  return seed
+}
 
 interface StartScreenProps {
   onStart: (mode: GameMode) => void
   onMultiplayer: () => void
   user: User | null
   lbRefreshKey: number
+  onNameChange?: () => void
 }
 
-export function StartScreen({ onStart, onMultiplayer, user, lbRefreshKey }: StartScreenProps) {
+export function StartScreen({ onStart, onMultiplayer, user, lbRefreshKey, onNameChange }: StartScreenProps) {
+  const seedToday = useDailySeed()
   return (
     <div className="overlay scrollable">
       <div className="top-bar">
-        <LoginButton user={user} />
+        <LoginButton user={user} onNameChange={onNameChange} />
       </div>
 
       <div className="subtitle">3D Neon Runner</div>
@@ -54,7 +71,11 @@ export function StartScreen({ onStart, onMultiplayer, user, lbRefreshKey }: Star
       <div className="hint">Tägliche Challenge: gleiches Level für alle · tritt gegen den Tages-Geist an 👻</div>
       <div className="hint">💎 Kristalle laden den Turbo · 🟡 Ultra-Bonus füllt ihn stark · ⭐ Stern = 4 Sek. unverwundbar</div>
 
-      <Leaderboard refreshKey={lbRefreshKey} highlightUid={user?.uid ?? null} />
+      {/* Beide Bestenlisten nebeneinander — klar getrennt nach Modus */}
+      <div className="lb-duo">
+        <Leaderboard refreshKey={lbRefreshKey} highlightUid={user?.uid ?? null} />
+        <Leaderboard mode="daily" seed={seedToday} refreshKey={lbRefreshKey} highlightUid={user?.uid ?? null} />
+      </div>
     </div>
   )
 }

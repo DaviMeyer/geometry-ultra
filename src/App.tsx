@@ -4,9 +4,10 @@
 // Multiplayer-Ablauf (Countdown -> Start, Positions-Sync, Crash -> finish).
 
 import { useEffect, useRef, useState } from 'react'
-import { saveDailyGhost } from './firebase/ghosts'
+import { retryPendingGhost, saveDailyGhost } from './firebase/ghosts'
 import { currentServerOffset, isStale, serverNow } from './firebase/multiplayer'
 import { submitDailyScore, submitScore } from './firebase/scores'
+import { dailySeed } from './game/rng'
 import { useAuth } from './hooks/useAuth'
 import { useEngine } from './hooks/useEngine'
 import { useMultiplayer } from './hooks/useMultiplayer'
@@ -109,6 +110,12 @@ export default function App() {
     return () => setProgressHandler(null)
   }, [mpActive, mp.pushProgress, setProgressHandler])
 
+  // --- Daily: liegengebliebenen Geist-Upload nachholen (z.B. nach Netzabriss),
+  // damit der Tages-Geist wirklich dem besten Lauf entspricht ---
+  useEffect(() => {
+    if (user) void retryPendingGhost(user, dailySeed())
+  }, [user])
+
   // --- Multiplayer: Beitritt kann nach einem "Zurück" noch nachträglich
   // durchgehen (Promise löst spät auf) — dann den Raum sofort wieder verlassen,
   // statt als Karteileiche die Lobby der anderen zu blockieren.
@@ -127,6 +134,7 @@ export default function App() {
       .filter((p) => p.uid && p.uid !== user?.uid)
       .map((p) => ({
         uid: p.uid,
+        name: p.name,
         x: p.x ?? 0,
         y: p.y ?? 0.6,
         z: p.z ?? 0,
@@ -211,7 +219,14 @@ export default function App() {
       <div className="canvas-host" ref={eng.containerRef} />
 
       {eng.uiState === 'playing' && (
-        <HUD score={eng.score} best={eng.best} speedPct={eng.speedPct} turboPct={eng.turboPct} invincibleSec={eng.invincibleSec} />
+        <HUD
+          score={eng.score}
+          best={eng.best}
+          speedPct={eng.speedPct}
+          turboPct={eng.turboPct}
+          invincibleSec={eng.invincibleSec}
+          proximity={eng.proximity}
+        />
       )}
 
       {/* Live-Rangliste während des Multiplayer-Rennens */}
@@ -225,7 +240,13 @@ export default function App() {
 
       {/* --- Solo-Oberflächen --- */}
       {!mpActive && eng.uiState === 'menu' && (
-        <StartScreen onStart={(mode) => void eng.beginRun(mode)} onMultiplayer={() => setMpActive(true)} user={user} lbRefreshKey={lbRefresh} />
+        <StartScreen
+          onStart={(mode) => void eng.beginRun(mode)}
+          onMultiplayer={() => setMpActive(true)}
+          user={user}
+          lbRefreshKey={lbRefresh}
+          onNameChange={() => setLbRefresh((k) => k + 1)}
+        />
       )}
       {!mpActive && eng.uiState === 'gameover' && eng.result && (
         <GameOverScreen

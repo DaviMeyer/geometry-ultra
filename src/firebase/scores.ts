@@ -7,11 +7,12 @@
 // ===========================================================================
 
 import type { User } from 'firebase/auth'
-import { collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore'
+import { dailySeed } from '../game/rng'
 import { db } from './config'
+import { getPlayerName } from './displayName'
 
-/** Rules erlauben max. 64 Zeichen — Google-Namen können länger sein. */
-const safeName = (user: User) => (user.displayName ?? 'Anonym').slice(0, 64)
+const safeName = (user: User) => getPlayerName(user)
 
 export interface ScoreEntry {
   uid: string
@@ -42,6 +43,18 @@ export async function submitScore(user: User, score: number, mode: string, seed:
     updatedAt: serverTimestamp(),
   })
   return true
+}
+
+/**
+ * Zieht eine Namensänderung sofort in die Bestenlisten nach — die Docs werden
+ * sonst nur bei einem NEUEN Rekord geschrieben, Top-Spieler blieben also ewig
+ * unter dem alten Namen stehen. Name-only-Updates bestehen die Rules (Score
+ * bleibt unverändert >= bisher). Fehler (z.B. noch kein Eintrag) sind egal.
+ */
+export async function updateLeaderboardName(user: User): Promise<void> {
+  const displayName = safeName(user)
+  await updateDoc(doc(db, 'scores', user.uid), { displayName }).catch(() => {})
+  await updateDoc(doc(db, 'dailyScores', String(dailySeed()), 'entries', user.uid), { displayName }).catch(() => {})
 }
 
 /** Lädt die besten `max` Scores (absteigend sortiert). */

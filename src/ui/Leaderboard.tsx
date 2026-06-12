@@ -46,7 +46,8 @@ export function Leaderboard({ mode = 'global', seed, refreshKey = 0, highlightUi
 
   return (
     <div className="leaderboard">
-      <div className="lb-title">{mode === 'daily' ? '📅 Heutige Challenge' : '🏆 Bestenliste'}</div>
+      <div className="lb-title">{mode === 'daily' ? '📅 Tages-Challenge' : '🏆 Endlos-Modus'}</div>
+      <div className="lb-subtitle">{mode === 'daily' ? 'nur heute · resettet täglich um 00:00 UTC' : 'Allzeit-Bestenliste'}</div>
       {loading && <div className="lb-msg">Lädt…</div>}
       {error && <div className="lb-msg">Konnte nicht geladen werden</div>}
       {!loading && !error && entries.length === 0 && <div className="lb-msg">Noch keine Einträge — sei der Erste!</div>}

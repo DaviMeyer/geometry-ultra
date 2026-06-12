@@ -66,6 +66,9 @@ export class Engine {
   private spectateSnap = false
   private collisionMode = false
   private wasBoosting = false
+  private bounceVx = 0 // abklingender Seitwärts-Impuls nach Bumper-Kollision
+  private bounceCooldown = 0 // drosselt Sound/Partikel bei Dauerkontakt
+  private lastProxKey = '' // Dedup für die Abstandsanzeige
 
   private lastT = performance.now()
   private rafId = 0
@@ -162,6 +165,10 @@ export class Engine {
     this.elapsed = 0
     this.camShake = 0
     this.progressAcc = 0
+    this.bounceVx = 0
+    this.bounceCooldown = 0
+    this.lastProxKey = ''
+    this.callbacks.onProximity?.(null)
     this.spectating = false
     this.lastReportedScore = -1
     this.lastReportedPct = -1
@@ -300,8 +307,27 @@ export class Engine {
       const push = this.remotePlayers.resolveCollision(p.x, p.z, 1.15)
       if (push !== 0) {
         p.x = Math.max(-LANE_LIMIT, Math.min(LANE_LIMIT, p.x + push))
+        // lustiger Schubs: federnder Impuls in Schubrichtung + Boing/Partikel
+        this.bounceVx = Math.sign(push) * 14
+        if (this.bounceCooldown <= 0) {
+          this.bounceCooldown = 0.35
+          this.audio.bounce()
+          this.particles.burst(p.x - Math.sign(push) * 0.8, p.y, p.z, COLORS.pink, 12, 5)
+          this.camShake = Math.max(this.camShake, 0.25)
+        }
+      }
+      // Impuls abklingen lassen — der Spieler kann jederzeit dagegen lenken
+      if (this.bounceVx !== 0) {
+        p.x += this.bounceVx * dt
+        this.bounceVx *= Math.exp(-dt * 6)
+        if (Math.abs(this.bounceVx) < 0.3) this.bounceVx = 0
+        if (p.x <= -LANE_LIMIT || p.x >= LANE_LIMIT) {
+          p.x = Math.max(-LANE_LIMIT, Math.min(LANE_LIMIT, p.x))
+          this.bounceVx *= -0.4 // kleiner Abpraller von der Bande
+        }
       }
     }
+    if (this.bounceCooldown > 0) this.bounceCooldown -= dt
 
     this.player.emitTrail()
 
@@ -364,6 +390,7 @@ export class Engine {
 
     this.audio.beat(dt, this.speed)
     this.reportScore(false)
+    this.reportProximity()
 
     // Multiplayer: eigene Position gedrosselt (~12 Hz) nach außen melden.
     // Bei Tempo-Sprüngen (Boost an/aus) sofort senden, damit die Extrapolation
@@ -488,6 +515,8 @@ export class Engine {
 
   private gameOver() {
     this.state = 'gameover'
+    this.lastProxKey = ''
+    this.callbacks.onProximity?.(null)
     this.audio.crash()
     this.camShake = 0.6
     const p = this.player.position
@@ -506,6 +535,30 @@ export class Engine {
     })
 
     this.goTimer = setTimeout(() => this.player.setVisible(true), 700)
+  }
+
+  /**
+   * Abstand zum nächsten Gegner (Multiplayer) bzw. zum Tages-Geist (Daily) —
+   * dedupliziert auf ganze Meter, damit React nicht jeden Frame rendert.
+   */
+  private reportProximity() {
+    if (!this.callbacks.onProximity) return
+    let target: { name?: string; z: number } | null = null
+    if (this.mode === 'multiplayer') target = this.remotePlayers.getNearest(this.player.position.z)
+    else if (this.mode === 'daily') target = this.ghostPlayer.getLeadGhost()
+
+    let key = ''
+    let info: { name: string; meters: number; ahead: boolean } | null = null
+    if (target) {
+      const dz = this.player.position.z - target.z // > 0: der andere ist vor dir (Welt-Z nimmt ab)
+      const meters = Math.round(Math.abs(dz))
+      const name = target.name || (this.mode === 'daily' ? 'Tages-Geist' : 'Spieler')
+      info = { name, meters, ahead: dz > 0 }
+      key = `${name}|${dz > 0}|${meters}`
+    }
+    if (key === this.lastProxKey) return
+    this.lastProxKey = key
+    this.callbacks.onProximity(info)
   }
 
   private reportScore(force: boolean) {

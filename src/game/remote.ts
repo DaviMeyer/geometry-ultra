@@ -16,6 +16,8 @@ import * as THREE from 'three'
 
 export interface RemoteState {
   uid: string
+  /** Anzeigename (für die Abstandsanzeige). */
+  name?: string
   x: number
   y: number
   z: number
@@ -45,6 +47,7 @@ interface TrailBit {
 interface Entry {
   mesh: THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>
   target: THREE.Vector3 // rohe Paket-Position
+  name: string
   t: number | null
   vz: number
   zOffset: number // Restfehler zwischen Anzeige und Extrapolation (wird abgebaut)
@@ -85,6 +88,7 @@ export class RemotePlayers {
         this.map.set(s.uid, entry)
       }
       entry.target.set(s.x, s.y, s.z)
+      if (s.name) entry.name = s.name
       entry.t = typeof s.t === 'number' ? s.t : null
       entry.vz = typeof s.vz === 'number' ? s.vz : 0
       entry.mesh.visible = s.alive
@@ -149,6 +153,21 @@ export class RemotePlayers {
     return best
   }
 
+  /** Der längs (Z) nächste sichtbare Mitspieler relativ zu `pz` (Abstandsanzeige). */
+  getNearest(pz: number): { name: string; z: number } | null {
+    let best: { name: string; z: number } | null = null
+    let bestDist = Infinity
+    for (const entry of this.map.values()) {
+      if (!entry.mesh.visible) continue
+      const dist = Math.abs(pz - entry.mesh.position.z)
+      if (dist < bestDist) {
+        bestDist = dist
+        best = { name: entry.name, z: entry.mesh.position.z }
+      }
+    }
+    return best
+  }
+
   /**
    * Bumper-Kollision: liefert den seitlichen Versatz, um aus der Überlappung mit
    * nahen Mitspielern herauszuschieben (0 = keine Kollision). Rechnet gegen die
@@ -208,7 +227,7 @@ export class RemotePlayers {
       trail.push({ mesh: m, life: 0 })
     }
 
-    return { mesh, target: new THREE.Vector3(), t: null, vz: 0, zOffset: 0, color, trail, trailIdx: 0 }
+    return { mesh, target: new THREE.Vector3(), name: 'Spieler', t: null, vz: 0, zOffset: 0, color, trail, trailIdx: 0 }
   }
 
   private removeEntry(entry: Entry) {

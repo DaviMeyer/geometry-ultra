@@ -28,6 +28,13 @@ export interface ProgressState {
   vz: number
 }
 
+/** Abstands-Info zum nächsten Gegner (Multiplayer) bzw. Tages-Geist (Daily). */
+export interface ProximityInfo {
+  name: string
+  meters: number
+  ahead: boolean // true = der andere ist VOR dir
+}
+
 /** Callbacks, über die die Engine mit React kommuniziert (ohne React zu kennen). */
 export interface EngineCallbacks {
   /** HUD-Update: Score, Tempo (%), Turbo-Füllstand (%) und Unverwundbarkeits-Restzeit (s). */
@@ -40,6 +47,8 @@ export interface EngineCallbacks {
   onMuteChange?: (muted: boolean) => void
   /** Nur im Multiplayer: gedrosselt (~12 Hz) die eigene Position für den Sync. */
   onProgress?: (state: ProgressState) => void
+  /** Abstand zum nächsten Gegner/Geist (dedupliziert auf ganze Meter, null = keiner). */
+  onProximity?: (info: ProximityInfo | null) => void
 }
 
 // --- Welt-Layout ---

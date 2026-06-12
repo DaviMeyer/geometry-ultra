@@ -13,7 +13,7 @@ import { Engine } from '../game/Engine'
 import type { GhostData } from '../game/ghost'
 import type { RemoteState } from '../game/remote'
 import { dailySeed, randomSeed } from '../game/rng'
-import type { GameMode, ProgressState, RunResult } from '../game/types'
+import type { GameMode, ProgressState, ProximityInfo, RunResult } from '../game/types'
 import { fetchDailyGhost } from '../firebase/ghosts'
 
 const BEST_KEY = 'geometryUltraBest'
@@ -55,6 +55,7 @@ export function useEngine() {
   const [lastGhost, setLastGhost] = useState<GhostData | null>(null)
   const [muted, setMuted] = useState(false)
   const [flashKey, setFlashKey] = useState(0)
+  const [proximity, setProximity] = useState<ProximityInfo | null>(null)
 
   /**
    * Startet einen Lauf. Seed: im Daily aus dem Datum, im Multiplayer per
@@ -83,6 +84,7 @@ export function useEngine() {
     setTurboPct(0)
     setInvincibleSec(0)
     setLastGhost(null)
+    setProximity(null)
     setUiState('playing')
   }, [])
 
@@ -112,6 +114,7 @@ export function useEngine() {
       },
       onMuteChange: (m) => setMuted(m),
       onProgress: (s) => progressHandlerRef.current?.(s),
+      onProximity: (info) => setProximity(info),
     })
     engineRef.current = engine
     return () => {
@@ -169,6 +172,7 @@ export function useEngine() {
     lastGhost,
     muted,
     flashKey,
+    proximity,
     beginRun,
     toMenu,
     toggleMute,

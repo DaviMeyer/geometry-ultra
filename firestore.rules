@@ -52,9 +52,11 @@ service cloud.firestore {
           && data.name.size() <= 64
           // interval/Listen streng validieren: ein manipuliertes Dokument würde
           // sonst die Geist-Wiedergabe ALLER Spieler des Tages zerlegen.
+          // Cap großzügig: der Recorder verdoppelt das Intervall bei langen
+          // Läufen (Downsampling) — 1/12 s * 2^6 ≈ 5,3 s bei ~50-min-Läufen.
           && data.interval is number
           && data.interval > 0
-          && data.interval <= 5
+          && data.interval <= 10
           && data.xs is list && data.xs.size() >= 1 && data.xs.size() <= 6000
           && data.ys is list && data.ys.size() == data.xs.size()
           && data.zs is list && data.zs.size() == data.xs.size();
@@ -94,12 +96,15 @@ service cloud.firestore {
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.seed == int(seed)
                     && validGhost(request.resource.data);
-      // überschreiben nur mit höherem Score und weiterhin gültigen Daten
+      // überschreiben nur mit höherem Score — ODER der Besitzer aktualisiert
+      // bei UNVERÄNDERTEM Score sein eigenes Dokument (Nickname-Änderung)
       allow update: if signedIn()
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.seed == int(seed)
                     && validGhost(request.resource.data)
-                    && request.resource.data.score > resource.data.score;
+                    && (request.resource.data.score > resource.data.score
+                        || (resource.data.uid == request.auth.uid
+                            && request.resource.data.score == resource.data.score));
     }
 
     // -- Alles andere ist gesperrt --

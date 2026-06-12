@@ -716,3 +716,84 @@ body,
     opacity: 0;
   }
 }
+
+/* ---------- Abstandsanzeige (nächster Gegner / Tages-Geist) ---------- */
+/* Unten mittig ÜBER den HUD-Bars — oben kollidiert es mit invincible-badge
+   und der Multiplayer-Live-Rangliste. */
+.proximity-line {
+  position: fixed;
+  bottom: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: rgba(6, 2, 15, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  white-space: nowrap;
+  max-width: min(92vw, 480px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 10;
+}
+.proximity-line.leading {
+  color: var(--neon-cyan);
+  border-color: rgba(0, 240, 255, 0.4);
+}
+.proximity-line.behind {
+  color: var(--neon-pink);
+  border-color: rgba(255, 46, 151, 0.4);
+}
+
+/* ---------- Doppel-Bestenliste auf dem StartScreen ---------- */
+.lb-duo {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  width: 100%;
+  max-width: 760px;
+}
+.lb-duo .leaderboard {
+  flex: 1 1 300px;
+  min-width: 280px;
+}
+.lb-subtitle {
+  font-size: 11px;
+  opacity: 0.55;
+  text-align: center;
+  margin: -4px 0 8px;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- Nickname-Bearbeitung im User-Chip ---------- */
+.user-name-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  cursor: pointer;
+}
+.nick-edit {
+  font-size: 11px;
+  opacity: 0.6;
+  flex-shrink: 0; /* der Stift wird nie mit-ellipsiert */
+}
+.user-name-wrap:hover .nick-edit {
+  opacity: 1;
+}
+.nick-input {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--neon-cyan);
+  border-radius: 6px;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 8px;
+  width: 150px;
+  outline: none;
+}

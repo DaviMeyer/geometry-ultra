@@ -48,6 +48,11 @@ export class AudioEngine {
   jump() {
     this.tone(420, 0.18, 'square', 0.25, 720)
   }
+  /** Cartooniges "Boing" für den Bumper-Zusammenstoß im Kollisionsmodus. */
+  bounce() {
+    this.tone(420, 0.22, 'sine', 0.32, 120)
+    setTimeout(() => this.tone(150, 0.18, 'triangle', 0.22, 360), 70)
+  }
   dbljump() {
     this.tone(560, 0.16, 'square', 0.22, 900)
   }

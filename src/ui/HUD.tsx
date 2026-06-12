@@ -1,5 +1,8 @@
-// HUD — Score, Highscore, Tempo-Anzeige, Turbo-Balken und (falls aktiv)
-// Unverwundbarkeits-Countdown.
+// HUD — Score, Highscore, Tempo-Anzeige, Turbo-Balken, (falls aktiv)
+// Unverwundbarkeits-Countdown und die Abstandsanzeige zum nächsten
+// Gegner (Multiplayer) bzw. Tages-Geist (Daily).
+
+import type { ProximityInfo } from '../game/types'
 
 interface HudProps {
   score: number
@@ -7,9 +10,15 @@ interface HudProps {
   speedPct: number
   turboPct: number
   invincibleSec: number
+  proximity?: ProximityInfo | null
 }
 
-export function HUD({ score, best, speedPct, turboPct, invincibleSec }: HudProps) {
+function proximityText(p: ProximityInfo): string {
+  if (p.meters === 0) return `⚡ ${p.name} ist direkt neben dir!`
+  return p.ahead ? `🔺 ${p.name} ist ${p.meters} m vor dir` : `🔻 ${p.name} ist ${p.meters} m hinter dir`
+}
+
+export function HUD({ score, best, speedPct, turboPct, invincibleSec, proximity = null }: HudProps) {
   return (
     <div className="hud">
       <div className="hud-top">
@@ -24,6 +33,8 @@ export function HUD({ score, best, speedPct, turboPct, invincibleSec }: HudProps
       </div>
 
       {invincibleSec > 0 && <div className="invincible-badge">⭐ UNVERWUNDBAR · {invincibleSec}s</div>}
+
+      {proximity && <div className={`proximity-line${proximity.ahead ? ' behind' : ' leading'}`}>{proximityText(proximity)}</div>}
 
       <div className="hud-bars">
         <div className="hud-bar">

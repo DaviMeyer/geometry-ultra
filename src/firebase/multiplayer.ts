@@ -25,6 +25,7 @@ import type { User } from 'firebase/auth'
 import { type Database, get, getDatabase, onDisconnect, onValue, ref, remove, serverTimestamp, set, update } from 'firebase/database'
 import { randomSeed } from '../game/rng'
 import { app } from './config'
+import { getPlayerName } from './displayName'
 
 export type RoomPhase = 'lobby' | 'countdown'
 
@@ -143,7 +144,7 @@ function generateRoomCode(): string {
 function newPlayer(user: User): RoomPlayer {
   return {
     uid: user.uid,
-    name: (user.displayName ?? 'Spieler').slice(0, 80),
+    name: getPlayerName(user, 'Spieler'),
     photoURL: user.photoURL ?? null,
     ready: false,
     x: 0,
