@@ -159,6 +159,11 @@ export function useEngine() {
     engineRef.current?.setServerOffset(offset)
   }, [])
 
+  /** Mobile: TURBO-Button im HUD halten/loslassen. */
+  const setTouchBoost = useCallback((on: boolean) => {
+    engineRef.current?.setTouchBoost(on)
+  }, [])
+
   return {
     containerRef,
     uiState,
@@ -181,5 +186,6 @@ export function useEngine() {
     setSpectating,
     setCollisionMode,
     setServerOffset,
+    setTouchBoost,
   }
 }

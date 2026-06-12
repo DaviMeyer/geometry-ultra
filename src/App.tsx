@@ -226,6 +226,7 @@ export default function App() {
           turboPct={eng.turboPct}
           invincibleSec={eng.invincibleSec}
           proximity={eng.proximity}
+          onBoost={eng.setTouchBoost}
         />
       )}
 

@@ -5,6 +5,7 @@ import type { User } from 'firebase/auth'
 import { useEffect, useState } from 'react'
 import { dailySeed } from '../game/rng'
 import type { GameMode } from '../game/types'
+import { IS_TOUCH } from './HUD'
 import { Leaderboard } from './Leaderboard'
 import { LoginButton } from './LoginButton'
 
@@ -41,20 +42,37 @@ export function StartScreen({ onStart, onMultiplayer, user, lbRefreshKey, onName
       <h1 className="title">GEOMETRY&nbsp;ULTRA</h1>
 
       <div className="panel">
-        <div className="controls-grid">
-          <span>
-            <span className="key">␣</span> / <span className="key">↑</span> / Klick
-          </span>
-          <span>Springen (Doppelsprung möglich)</span>
-          <span>
-            <span className="key">A</span> <span className="key">D</span> / <span className="key">←</span> <span className="key">→</span>
-          </span>
-          <span>Seitlich ausweichen</span>
-          <span>
-            <span className="key">⇧ Shift</span>
-          </span>
-          <span>Turbo (halten, lädt sich auf)</span>
-        </div>
+        {IS_TOUCH ? (
+          <div className="controls-grid">
+            <span>
+              <span className="key">👆 Tippen</span>
+            </span>
+            <span>Springen (2× tippen = Doppelsprung)</span>
+            <span>
+              <span className="key">👉 Wischen</span>
+            </span>
+            <span>Seitlich lenken (Finger halten)</span>
+            <span>
+              <span className="key">⚡ halten</span>
+            </span>
+            <span>Turbo (Button unten rechts im Spiel)</span>
+          </div>
+        ) : (
+          <div className="controls-grid">
+            <span>
+              <span className="key">␣</span> / <span className="key">↑</span> / Klick
+            </span>
+            <span>Springen (Doppelsprung möglich)</span>
+            <span>
+              <span className="key">A</span> <span className="key">D</span> / <span className="key">←</span> <span className="key">→</span>
+            </span>
+            <span>Seitlich ausweichen</span>
+            <span>
+              <span className="key">⇧ Shift</span>
+            </span>
+            <span>Turbo (halten, lädt sich auf)</span>
+          </div>
+        )}
       </div>
 
       <div className="mode-buttons">

@@ -151,6 +151,11 @@ export class Engine {
     this.collisionMode = on
   }
 
+  /** Mobile: TURBO-Button im HUD wird gehalten/losgelassen. */
+  setTouchBoost(on: boolean) {
+    this.input.setTouchBoost(on)
+  }
+
   /** Startet einen neuen Lauf. spawnX: seitliche Startposition (Multiplayer-Aufstellung). */
   start(seed: number, mode: GameMode = 'classic', spawnX = 0) {
     this.audio.init()

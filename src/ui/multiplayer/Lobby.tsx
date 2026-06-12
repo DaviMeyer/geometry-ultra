@@ -73,6 +73,10 @@ export function Lobby(props: LobbyProps) {
               className="mp-input"
               placeholder="CODE"
               maxLength={4}
+              autoCapitalize="characters"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={joinCode}
               onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
             />

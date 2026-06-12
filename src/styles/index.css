@@ -797,3 +797,81 @@ body,
   width: 150px;
   outline: none;
 }
+
+/* ---------- Mobile ---------- */
+
+/* TURBO-Halten-Button (nur auf Touch-Geräten gerendert). Der Füllstand des
+   Turbo-Balkens läuft als Pegel (--fill) im Button mit. */
+.turbo-btn {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: calc(110px + env(safe-area-inset-bottom, 0px));
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 225, 74, 0.7);
+  background:
+    linear-gradient(to top, rgba(255, 225, 74, 0.45) var(--fill, 0%), rgba(10, 4, 25, 0.55) var(--fill, 0%));
+  color: var(--neon-cyan);
+  font-size: 30px;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: 0 0 24px rgba(255, 225, 74, 0.3);
+  z-index: 12;
+}
+.turbo-btn:active {
+  transform: scale(0.92);
+  box-shadow: 0 0 36px rgba(255, 225, 74, 0.6);
+}
+
+/* Notch/Statusleiste nicht überdecken */
+.hud-top {
+  top: calc(22px + env(safe-area-inset-top, 0px));
+}
+.mute-btn {
+  margin-top: env(safe-area-inset-top, 0px);
+}
+
+/* Kompakteres Layout auf schmalen Screens */
+@media (max-width: 520px) {
+  .hud-top {
+    padding: 0 14px;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+  }
+  .stat {
+    padding: 7px 12px;
+    border-radius: 11px;
+  }
+  .stat .value {
+    font-size: 22px;
+  }
+  .overlay {
+    gap: 13px;
+    padding: 16px;
+  }
+  .btn {
+    font-size: 16px;
+    padding: 13px 30px;
+  }
+  .controls-grid {
+    font-size: 13px;
+    gap: 8px 12px;
+  }
+  .go-stats .big {
+    font-size: 34px;
+  }
+  .hud-bars {
+    width: min(300px, 62vw); /* Platz für den TURBO-Button rechts lassen */
+    left: 42%;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+  .proximity-line {
+    bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+    font-size: 12px;
+  }
+  .mp-ranking {
+    font-size: 11px;
+  }
+}

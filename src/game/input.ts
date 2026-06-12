@@ -22,6 +22,7 @@ export class InputManager {
   private touchTargetDir = 0
   private touchStartX: number | null = null
   private touchMoved = false
+  private touchBoost = false // gehaltener TURBO-Button (Mobile)
   private canvas: HTMLElement | null = null
 
   constructor(private cb: InputCallbacks) {}
@@ -63,9 +64,14 @@ export class InputManager {
     return s
   }
 
-  /** Ob der Turbo gerade gehalten wird (Shift). */
+  /** Ob der Turbo gerade gehalten wird (Shift oder Touch-Button). */
   isBoosting(): boolean {
-    return !!this.keys['shift']
+    return !!this.keys['shift'] || this.touchBoost
+  }
+
+  /** Mobile: TURBO-Button wird gehalten/losgelassen. */
+  setTouchBoost(on: boolean) {
+    this.touchBoost = on
   }
 
   reset() {
@@ -73,6 +79,7 @@ export class InputManager {
     this.touchTargetDir = 0
     this.touchStartX = null
     this.touchMoved = false
+    this.touchBoost = false
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -97,6 +104,7 @@ export class InputManager {
     this.keys = {}
     this.touchTargetDir = 0
     this.touchStartX = null
+    this.touchBoost = false
   }
 
   private onPointerDown = (e: PointerEvent) => {
