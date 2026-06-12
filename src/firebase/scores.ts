@@ -10,6 +10,9 @@ import type { User } from 'firebase/auth'
 import { collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore'
 import { db } from './config'
 
+/** Rules erlauben max. 64 Zeichen — Google-Namen können länger sein. */
+const safeName = (user: User) => (user.displayName ?? 'Anonym').slice(0, 64)
+
 export interface ScoreEntry {
   uid: string
   displayName: string
@@ -31,7 +34,7 @@ export async function submitScore(user: User, score: number, mode: string, seed:
 
   await setDoc(ref, {
     uid: user.uid,
-    displayName: user.displayName ?? 'Anonym',
+    displayName: safeName(user),
     photoURL: user.photoURL ?? null,
     score,
     mode,
@@ -60,7 +63,7 @@ export async function submitDailyScore(user: User, score: number, seed: number):
 
   await setDoc(ref, {
     uid: user.uid,
-    displayName: user.displayName ?? 'Anonym',
+    displayName: safeName(user),
     photoURL: user.photoURL ?? null,
     score,
     updatedAt: serverTimestamp(),

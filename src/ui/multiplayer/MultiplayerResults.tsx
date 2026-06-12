@@ -2,21 +2,25 @@
 //  - Solange noch jemand fährt: kompaktes Zuschauer-Overlay (lässt die 3D-Szene
 //    sichtbar, denn die Kamera folgt dem führenden Mitspieler).
 //  - Sobald alle durch sind: voller Endstand mit Rangliste.
+// Spieler, die seit längerem nichts mehr senden (Tab zu/Verbindung weg), werden
+// wie ausgeschieden behandelt — sonst würde der Endstand nie erscheinen.
 
 import type { User } from 'firebase/auth'
-import type { RoomState } from '../../firebase/multiplayer'
+import { isStale, type RoomState } from '../../firebase/multiplayer'
 import { Avatar } from '../Avatar'
 
 interface Props {
   room: RoomState | null
   user: User | null
+  /** Server-Zeit-Offset (Server-Zeit ≈ Date.now() + offset). */
+  offset: number
   onRematch: () => void
   onLeave: () => void
 }
 
 const effScore = (p: { finished?: boolean; finalScore?: number; score?: number }) => (p.finished ? (p.finalScore ?? 0) : (p.score ?? 0))
 
-export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
+export function MultiplayerResults({ room, user, offset, onRematch, onLeave }: Props) {
   if (!room) {
     return (
       <div className="overlay">
@@ -28,14 +32,16 @@ export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
     )
   }
 
+  const now = Date.now() + offset
+  const done = (p: Parameters<typeof isStale>[0]) => p.finished || isStale(p, now, room.meta.startAt)
   const players = Object.values(room.players ?? {}).sort((a, b) => effScore(b) - effScore(a))
-  const allFinished = players.length > 0 && players.every((p) => p.finished)
+  const allFinished = players.length > 0 && players.every(done)
   const isHost = room.meta.host === user?.uid
   const medals = ['🥇', '🥈', '🥉']
 
   // ----- Zuschauer-Modus (noch fährt jemand) -----
   if (!allFinished) {
-    const leader = players.find((p) => !p.finished)
+    const leader = players.find((p) => !done(p))
     return (
       <div className="spectate-overlay">
         <div className="spectate-card">
@@ -46,7 +52,7 @@ export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
               <li key={p.uid} className={`lb-row${p.uid === user?.uid ? ' me' : ''}`}>
                 <span className="lb-rank">{i + 1}</span>
                 <span className="lb-name">
-                  {p.name} {p.finished ? '💥' : '🏃'}
+                  {p.name} {p.finished ? '💥' : isStale(p, now, room.meta.startAt) ? '📴' : '🏃'}
                 </span>
                 <span className="lb-score">{effScore(p)}</span>
               </li>

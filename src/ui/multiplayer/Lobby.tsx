@@ -82,6 +82,9 @@ export function Lobby(props: LobbyProps) {
           </div>
           {error && <div className="mp-error">{error}</div>}
         </div>
+        {/* Bewusst NICHT während busy gesperrt: hängt der Beitritt (Netzstörung),
+            muss Zurück erreichbar bleiben. Einen evtl. doch noch durchgehenden
+            Beitritt räumt App per Aufräum-Effect wieder ab. */}
         <button className="btn secondary" onClick={onBack}>
           Zurück
         </button>

@@ -18,6 +18,24 @@ import { fetchDailyGhost } from '../firebase/ghosts'
 
 const BEST_KEY = 'geometryUltraBest'
 
+// localStorage kann komplett fehlen/werfen (Safari "Alle Cookies blockieren",
+// manche In-App-WebViews). Das darf weder den ersten Render noch die
+// Render-Loop (onGameOver) töten -> defensiv kapseln.
+function readBest(): number {
+  try {
+    return parseInt(localStorage.getItem(BEST_KEY) || '0', 10)
+  } catch {
+    return 0
+  }
+}
+function writeBest(score: number) {
+  try {
+    localStorage.setItem(BEST_KEY, String(score))
+  } catch {
+    // kein Storage verfügbar — Bestwert lebt dann nur im State
+  }
+}
+
 export type UiState = 'menu' | 'playing' | 'gameover'
 
 export function useEngine() {
@@ -31,7 +49,7 @@ export function useEngine() {
   const [speedPct, setSpeedPct] = useState(0)
   const [turboPct, setTurboPct] = useState(0)
   const [invincibleSec, setInvincibleSec] = useState(0)
-  const [best, setBest] = useState(() => parseInt(localStorage.getItem(BEST_KEY) || '0', 10))
+  const [best, setBest] = useState(readBest)
   const [isNewBest, setIsNewBest] = useState(false)
   const [result, setResult] = useState<RunResult | null>(null)
   const [lastGhost, setLastGhost] = useState<GhostData | null>(null)
@@ -78,9 +96,9 @@ export function useEngine() {
         setInvincibleSec(inv)
       },
       onGameOver: (r) => {
-        const prevBest = parseInt(localStorage.getItem(BEST_KEY) || '0', 10)
+        const prevBest = readBest()
         const newBest = r.score > prevBest
-        if (newBest) localStorage.setItem(BEST_KEY, String(r.score))
+        if (newBest) writeBest(r.score)
         setBest(Math.max(prevBest, r.score))
         setIsNewBest(newBest)
         setResult(r)
@@ -133,6 +151,11 @@ export function useEngine() {
     engineRef.current?.setCollisionMode(on)
   }, [])
 
+  /** Server-Zeit-Offset für die Mitspieler-Extrapolation (Multiplayer). */
+  const setServerOffset = useCallback((offset: number) => {
+    engineRef.current?.setServerOffset(offset)
+  }, [])
+
   return {
     containerRef,
     uiState,
@@ -153,5 +176,6 @@ export function useEngine() {
     updateRemote,
     setSpectating,
     setCollisionMode,
+    setServerOffset,
   }
 }

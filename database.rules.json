@@ -6,11 +6,11 @@
       "$roomId": {
         ".read": "auth != null",
 
-        ".write": "auth != null && !data.exists() && newData.child('meta').child('host').val() === auth.uid",
+        ".write": "auth != null && ((!data.exists() && newData.child('meta').child('host').val() === auth.uid) || (data.exists() && !newData.exists() && data.child('meta').child('host').val() === auth.uid))",
 
         "meta": {
-          ".write": "auth != null && data.child('host').val() === auth.uid",
-          "host": { ".validate": "newData.val() === auth.uid || newData.val() === data.val()" },
+          ".write": "auth != null && (data.child('host').val() === auth.uid || (data.parent().child('players').child(auth.uid).exists() && !data.parent().child('players').child(data.child('host').val()).exists()))",
+          "host": { ".validate": "newData.val() === auth.uid || newData.val() === data.val() || data.parent().parent().child('players').child(newData.val()).exists()" },
           "seed": { ".validate": "newData.isNumber()" },
           "state": { ".validate": "newData.val() === 'lobby' || newData.val() === 'countdown'" },
           "startAt": { ".validate": "!newData.exists() || newData.isNumber()" },
@@ -21,7 +21,7 @@
 
         "players": {
           "$uid": {
-            ".write": "auth != null && ($uid === auth.uid || data.parent().parent().child('meta').child('host').val() === auth.uid)",
+            ".write": "auth != null && ($uid === auth.uid || data.parent().parent().child('meta').child('host').val() === auth.uid) && (data.exists() || !newData.exists() || (newData.hasChildren(['uid', 'name']) && data.parent().parent().child('meta').child('state').val() === 'lobby'))",
             "uid": { ".validate": "newData.val() === $uid" },
             "name": { ".validate": "newData.isString() && newData.val().length <= 80" },
             "photoURL": { ".validate": "newData.val() === null || (newData.isString() && newData.val().length <= 300 && newData.val().beginsWith('https://'))" },
@@ -33,6 +33,8 @@
             "score": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000000" },
             "finished": { ".validate": "newData.isBoolean()" },
             "finalScore": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000000" },
+            "t": { ".validate": "newData.isNumber()" },
+            "vz": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 200" },
             "$other": { ".validate": false }
           }
         },

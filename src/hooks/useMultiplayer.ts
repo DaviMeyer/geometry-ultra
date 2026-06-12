@@ -10,6 +10,7 @@ import type { User } from 'firebase/auth'
 import { useCallback, useEffect, useState } from 'react'
 import type { ProgressState } from '../game/types'
 import {
+  claimHost,
   createRoom,
   finishRace as mpFinishRace,
   pushProgress as mpPushProgress,
@@ -38,6 +39,18 @@ export function useMultiplayer(user: User | null) {
     return unsub
   }, [code])
 
+  // Host-Ausfall: Ist der eingetragene Host nicht mehr im Raum, übernimmt der
+  // (stabil) erste verbleibende Spieler — sonst könnte nie wieder jemand
+  // starten oder eine Revanche auslösen.
+  useEffect(() => {
+    if (!room || !user || !code) return
+    const ids = Object.keys(room.players ?? {}).sort()
+    if (!ids.includes(user.uid)) return
+    if (room.players[room.meta.host]) return // Host ist noch da
+    if (ids[0] !== user.uid) return // nur einer übernimmt
+    void claimHost(code, user.uid)
+  }, [room, user, code])
+
   const create = useCallback(async () => {
     if (!user) return
     setBusy(true)
@@ -62,13 +75,15 @@ export function useMultiplayer(user: User | null) {
       setBusy(true)
       setError(null)
       try {
-        const ok = await joinRoom(c, user)
-        if (!ok) {
-          setError('Raum nicht gefunden')
+        const res = await joinRoom(c, user)
+        if (res !== 'ok') {
+          setError(res === 'running' ? 'Das Rennen läuft bereits — warte auf die nächste Runde' : res === 'expired' ? 'Dieser Raum ist abgelaufen' : 'Raum nicht gefunden')
           return
         }
-        setOffset(await getServerOffset())
+        // Code sofort setzen, damit ein "Zurück" während des Offset-Wartens
+        // den Raum sauber wieder verlassen kann (kein Zombie-Spieler).
         setCode(c)
+        setOffset(await getServerOffset())
       } catch (e) {
         console.error(e)
         setError('Beitritt fehlgeschlagen')
@@ -93,8 +108,9 @@ export function useMultiplayer(user: User | null) {
   }, [code, user, room])
 
   const start = useCallback(async () => {
-    if (code) await startCountdown(code)
-  }, [code])
+    // nur aus der Lobby heraus starten (Doppelklick/Spätklick abfangen)
+    if (code && room?.meta.state === 'lobby') await startCountdown(code)
+  }, [code, room])
 
   const toggleCollision = useCallback(async () => {
     if (code && room) await setCollision(code, !room.meta.collision)
@@ -115,9 +131,12 @@ export function useMultiplayer(user: User | null) {
   )
 
   const rematch = useCallback(async () => {
-    if (code) {
+    if (!code) return
+    try {
       await resetRoom(code)
       setOffset(await getServerOffset())
+    } catch (e) {
+      console.error('Revanche fehlgeschlagen:', e)
     }
   }, [code])
 

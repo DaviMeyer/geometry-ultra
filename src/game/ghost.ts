@@ -25,9 +25,12 @@ export interface GhostData {
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
+/** Maximale Sample-Anzahl — muss zum Limit in den Firestore-Rules passen. */
+const MAX_SAMPLES = 6000
+
 /** Zeichnet während eines Laufs die Spielerposition in festen Intervallen auf. */
 export class GhostRecorder {
-  readonly interval = 1 / 12
+  private interval = 1 / 12
   private acc = 0
   private xs: number[] = []
   private ys: number[] = []
@@ -35,6 +38,7 @@ export class GhostRecorder {
 
   reset() {
     this.acc = 0
+    this.interval = 1 / 12
     this.xs = []
     this.ys = []
     this.zs = []
@@ -47,6 +51,16 @@ export class GhostRecorder {
       this.xs.push(round2(x))
       this.ys.push(round2(y))
       this.zs.push(round2(z))
+      // Sehr lange Läufe würden das Rules-Limit sprengen und der Upload schlüge
+      // fehl: adaptiv ausdünnen (jedes 2. Sample raus, Intervall verdoppeln).
+      if (this.xs.length >= MAX_SAMPLES) {
+        const keep = (_v: number, i: number) => i % 2 === 0
+        this.xs = this.xs.filter(keep)
+        this.ys = this.ys.filter(keep)
+        this.zs = this.zs.filter(keep)
+        this.interval *= 2
+        this.acc = 0
+      }
     }
   }
 

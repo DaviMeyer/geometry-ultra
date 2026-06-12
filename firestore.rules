@@ -27,9 +27,10 @@ service cloud.firestore {
     function isOwner(uid) {
       return signedIn() && request.auth.uid == uid;
     }
-    // Realistischer Höchstwert (selbst sehr lange Läufe bleiben weit darunter).
+    // Realistischer Höchstwert (selbst sehr lange Läufe bleiben weit darunter;
+    // ~46 units/s Maximaltempo => 250k entspräche über 1,5 Stunden Dauerlauf).
     function maxScore() {
-      return 5000000;
+      return 250000;
     }
     function validPhoto(data) {
       return !('photoURL' in data) || data.photoURL == null
@@ -49,9 +50,14 @@ service cloud.firestore {
           && data.score <= maxScore()
           && data.name is string
           && data.name.size() <= 64
-          && data.xs is list && data.xs.size() <= 6000
-          && data.ys is list && data.ys.size() <= 6000
-          && data.zs is list && data.zs.size() <= 6000;
+          // interval/Listen streng validieren: ein manipuliertes Dokument würde
+          // sonst die Geist-Wiedergabe ALLER Spieler des Tages zerlegen.
+          && data.interval is number
+          && data.interval > 0
+          && data.interval <= 5
+          && data.xs is list && data.xs.size() >= 1 && data.xs.size() <= 6000
+          && data.ys is list && data.ys.size() == data.xs.size()
+          && data.zs is list && data.zs.size() == data.xs.size();
     }
 
     // -- Globale Bestenliste (ein Dokument pro Nutzer, Doc-ID = uid) --
@@ -82,12 +88,16 @@ service cloud.firestore {
     // -- Tages-Geist: ein Dokument pro Seed (Doc-ID = seed), nur der Beste --
     match /dailyGhosts/{seed} {
       allow read: if true;
+      // seed im Dokument MUSS zur Doc-ID passen — sonst kann ein Angreifer die
+      // Geister beliebiger (auch zukünftiger) Tage vorab vergiften/blockieren.
       allow create: if signedIn()
                     && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.seed == int(seed)
                     && validGhost(request.resource.data);
       // überschreiben nur mit höherem Score und weiterhin gültigen Daten
       allow update: if signedIn()
                     && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.seed == int(seed)
                     && validGhost(request.resource.data)
                     && request.resource.data.score > resource.data.score;
     }

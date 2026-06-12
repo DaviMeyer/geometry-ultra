@@ -1,0 +1,1842 @@
+diff --git a/database.rules.json b/database.rules.json
+index 4062fc2..1219bfc 100644
+--- a/database.rules.json
++++ b/database.rules.json
+@@ -6,11 +6,11 @@
+       "$roomId": {
+         ".read": "auth != null",
+ 
+-        ".write": "auth != null && !data.exists() && newData.child('meta').child('host').val() === auth.uid",
++        ".write": "auth != null && ((!data.exists() && newData.child('meta').child('host').val() === auth.uid) || (data.exists() && !newData.exists() && data.child('meta').child('host').val() === auth.uid))",
+ 
+         "meta": {
+-          ".write": "auth != null && data.child('host').val() === auth.uid",
+-          "host": { ".validate": "newData.val() === auth.uid || newData.val() === data.val()" },
++          ".write": "auth != null && (data.child('host').val() === auth.uid || (data.parent().child('players').child(auth.uid).exists() && !data.parent().child('players').child(data.child('host').val()).exists()))",
++          "host": { ".validate": "newData.val() === auth.uid || newData.val() === data.val() || data.parent().parent().child('players').child(newData.val()).exists()" },
+           "seed": { ".validate": "newData.isNumber()" },
+           "state": { ".validate": "newData.val() === 'lobby' || newData.val() === 'countdown'" },
+           "startAt": { ".validate": "!newData.exists() || newData.isNumber()" },
+@@ -21,7 +21,7 @@
+ 
+         "players": {
+           "$uid": {
+-            ".write": "auth != null && ($uid === auth.uid || data.parent().parent().child('meta').child('host').val() === auth.uid)",
++            ".write": "auth != null && ($uid === auth.uid || data.parent().parent().child('meta').child('host').val() === auth.uid) && (data.exists() || !newData.exists() || (newData.hasChildren(['uid', 'name']) && data.parent().parent().child('meta').child('state').val() === 'lobby'))",
+             "uid": { ".validate": "newData.val() === $uid" },
+             "name": { ".validate": "newData.isString() && newData.val().length <= 80" },
+             "photoURL": { ".validate": "newData.val() === null || (newData.isString() && newData.val().length <= 300 && newData.val().beginsWith('https://'))" },
+@@ -33,6 +33,8 @@
+             "score": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000000" },
+             "finished": { ".validate": "newData.isBoolean()" },
+             "finalScore": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 5000000" },
++            "t": { ".validate": "newData.isNumber()" },
++            "vz": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 200" },
+             "$other": { ".validate": false }
+           }
+         },
+diff --git a/firestore.rules b/firestore.rules
+index 01b25db..e4d6c93 100644
+--- a/firestore.rules
++++ b/firestore.rules
+@@ -27,9 +27,10 @@ service cloud.firestore {
+     function isOwner(uid) {
+       return signedIn() && request.auth.uid == uid;
+     }
+-    // Realistischer Höchstwert (selbst sehr lange Läufe bleiben weit darunter).
++    // Realistischer Höchstwert (selbst sehr lange Läufe bleiben weit darunter;
++    // ~46 units/s Maximaltempo => 250k entspräche über 1,5 Stunden Dauerlauf).
+     function maxScore() {
+-      return 5000000;
++      return 250000;
+     }
+     function validPhoto(data) {
+       return !('photoURL' in data) || data.photoURL == null
+@@ -49,9 +50,14 @@ service cloud.firestore {
+           && data.score <= maxScore()
+           && data.name is string
+           && data.name.size() <= 64
+-          && data.xs is list && data.xs.size() <= 6000
+-          && data.ys is list && data.ys.size() <= 6000
+-          && data.zs is list && data.zs.size() <= 6000;
++          // interval/Listen streng validieren: ein manipuliertes Dokument würde
++          // sonst die Geist-Wiedergabe ALLER Spieler des Tages zerlegen.
++          && data.interval is number
++          && data.interval > 0
++          && data.interval <= 5
++          && data.xs is list && data.xs.size() >= 1 && data.xs.size() <= 6000
++          && data.ys is list && data.ys.size() == data.xs.size()
++          && data.zs is list && data.zs.size() == data.xs.size();
+     }
+ 
+     // -- Globale Bestenliste (ein Dokument pro Nutzer, Doc-ID = uid) --
+@@ -82,12 +88,16 @@ service cloud.firestore {
+     // -- Tages-Geist: ein Dokument pro Seed (Doc-ID = seed), nur der Beste --
+     match /dailyGhosts/{seed} {
+       allow read: if true;
++      // seed im Dokument MUSS zur Doc-ID passen — sonst kann ein Angreifer die
++      // Geister beliebiger (auch zukünftiger) Tage vorab vergiften/blockieren.
+       allow create: if signedIn()
+                     && request.resource.data.uid == request.auth.uid
++                    && request.resource.data.seed == int(seed)
+                     && validGhost(request.resource.data);
+       // überschreiben nur mit höherem Score und weiterhin gültigen Daten
+       allow update: if signedIn()
+                     && request.resource.data.uid == request.auth.uid
++                    && request.resource.data.seed == int(seed)
+                     && validGhost(request.resource.data)
+                     && request.resource.data.score > resource.data.score;
+     }
+diff --git a/src/App.tsx b/src/App.tsx
+index cad6434..08a1197 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -5,6 +5,7 @@
+ 
+ import { useEffect, useRef, useState } from 'react'
+ import { saveDailyGhost } from './firebase/ghosts'
++import { isStale } from './firebase/multiplayer'
+ import { submitDailyScore, submitScore } from './firebase/scores'
+ import { useAuth } from './hooks/useAuth'
+ import { useEngine } from './hooks/useEngine'
+@@ -25,15 +26,40 @@ export default function App() {
+   const [saveStatus, setSaveStatus] = useState<string | null>(null)
+   const [mpActive, setMpActive] = useState(false)
+ 
+-  const { beginRun, setProgressHandler, updateRemote, setSpectating, setCollisionMode } = eng
++  const { beginRun, setProgressHandler, updateRemote, setSpectating, setCollisionMode, setServerOffset } = eng
+   const phase = mp.room?.meta.state
+   const startAt = mp.room?.meta.startAt
+   const seed = mp.room?.meta.seed
+   const startedRef = useRef(false)
+   const finishedRef = useRef(false)
+ 
++  // Aktuelle Werte für den Start-Timer — bewusst über Refs, damit der
++  // Countdown-Effect NICHT von mp.room abhängen muss (jedes RTDB-Update erzeugt
++  // ein neues Raum-Objekt; als Dependency würde das Cleanup den armierten
++  // Start-Timer abräumen und der Client würde nie starten).
++  const roomRef = useRef(mp.room)
++  roomRef.current = mp.room
++  const userRef = useRef(user)
++  userRef.current = user
++  const offsetRef = useRef(mp.offset)
++  offsetRef.current = mp.offset
++
++  // Spieler, die mitten im Lauf seit längerem nichts mehr senden (Tab zu,
++  // Verbindung weg ohne onDisconnect), blockieren weder den Endstand noch
++  // bleiben ihre Cubes als Geister stehen.
++  const nowServer = Date.now() + mp.offset
+   const mpPlayers = mp.room ? Object.values(mp.room.players ?? {}) : []
+-  const allFinished = mpPlayers.length > 0 && mpPlayers.every((p) => p.finished)
++  const allFinished = mpPlayers.length > 0 && mpPlayers.every((p) => p.finished || isStale(p, nowServer))
++
++  // Stale-Erkennung braucht eine tickende Uhr: Wenn der letzte aktive Spieler
++  // einfach verschwindet (Tab zu), kommen keine Raum-Updates mehr — ohne Tick
++  // würde der Zuschauer-Screen nie zum Endstand wechseln.
++  const [, setStaleTick] = useState(0)
++  useEffect(() => {
++    if (!(mpActive && eng.uiState === 'gameover' && !allFinished)) return
++    const id = setInterval(() => setStaleTick((k) => k + 1), 1000)
++    return () => clearInterval(id)
++  }, [mpActive, eng.uiState, allFinished])
+ 
+   // --- Solo: Score (und im Daily der Geist) nach dem Crash hochladen ---
+   useEffect(() => {
+@@ -51,8 +77,11 @@ export default function App() {
+     setSaveStatus('Score wird gespeichert…')
+ 
+     if (mode === 'daily') {
+-      Promise.all([submitDailyScore(user, score, runSeed), ghost ? saveDailyGhost(user, ghost) : Promise.resolve(false)])
+-        .then(([saved]) => {
++      // Score-Status hängt NUR am Score-Upload; der Geist wird unabhängig
++      // gespeichert (sein Scheitern ist kein Nutzerfehler, z.B. wenn fast
++      // gleichzeitig jemand einen besseren Lauf hochlädt).
++      submitDailyScore(user, score, runSeed)
++        .then((saved) => {
+           setSaveStatus(saved ? '✓ Tages-Score gespeichert' : 'Kein neuer Tagesrekord')
+           setLbRefresh((k) => k + 1)
+         })
+@@ -60,6 +89,9 @@ export default function App() {
+           console.error('Daily-Upload fehlgeschlagen:', err)
+           setSaveStatus('Speichern fehlgeschlagen')
+         })
++      if (ghost) {
++        saveDailyGhost(user, ghost).catch((err) => console.warn('Geist konnte nicht gespeichert werden:', err))
++      }
+     } else {
+       submitScore(user, score, mode, runSeed)
+         .then((saved) => {
+@@ -79,38 +111,68 @@ export default function App() {
+     return () => setProgressHandler(null)
+   }, [mpActive, mp.pushProgress, setProgressHandler])
+ 
++  // --- Multiplayer: Server-Zeit-Offset an die Engine geben (Extrapolation) ---
++  useEffect(() => {
++    setServerOffset(mp.offset)
++  }, [mp.offset, setServerOffset])
++
+   // --- Multiplayer: Mitspieler-Cubes aktualisieren ---
+   useEffect(() => {
+     if (!mpActive || !mp.room) return
++    const now = Date.now() + mp.offset
+     const others = Object.values(mp.room.players ?? {})
+-      .filter((p) => p.uid !== user?.uid)
+-      .map((p) => ({ uid: p.uid, x: p.x ?? 0, y: p.y ?? 0.6, z: p.z ?? 0, alive: (p.alive ?? true) && !p.finished }))
++      .filter((p) => p.uid && p.uid !== user?.uid)
++      .map((p) => ({
++        uid: p.uid,
++        x: p.x ?? 0,
++        y: p.y ?? 0.6,
++        z: p.z ?? 0,
++        alive: (p.alive ?? true) && !p.finished && !isStale(p, now),
++        t: p.t,
++        vz: p.vz,
++      }))
+     updateRemote(others)
+-  }, [mpActive, mp.room, user, updateRemote])
++  }, [mpActive, mp.room, mp.offset, user, updateRemote])
+ 
+   // --- Multiplayer: Countdown -> synchron + nebeneinander starten ---
++  // Abhängig nur von Primitiven (phase/startAt/seed): Raum-Updates während des
++  // Countdowns dürfen den Timer nicht abräumen. Raumdaten kommen aus Refs.
+   useEffect(() => {
+     if (!mpActive) return
+     if (phase === 'lobby') {
+       startedRef.current = false
+       return
+     }
+-    if (phase === 'countdown' && startAt && seed !== undefined && !startedRef.current) {
++    if (phase !== 'countdown' || !startAt || seed === undefined) return
++    if (startedRef.current) return
++
++    const fire = () => {
++      if (startedRef.current) return
+       startedRef.current = true
+       // Startaufstellung nebeneinander: eigener Index in stabil sortierter Liste
+-      const ids = mp.room ? Object.keys(mp.room.players ?? {}).sort() : []
+-      const myIndex = user ? Math.max(0, ids.indexOf(user.uid)) : 0
++      const room = roomRef.current
++      const me = userRef.current
++      const ids = room ? Object.keys(room.players ?? {}).sort() : []
++      const myIndex = me ? Math.max(0, ids.indexOf(me.uid)) : 0
+       const n = ids.length || 1
+       const spawnX = (myIndex - (n - 1) / 2) * 2.5
+-      const collision = mp.room?.meta.collision ?? false
+-      const delay = Math.max(0, startAt - mp.offset - Date.now())
+-      const t = setTimeout(() => {
+-        setCollisionMode(collision)
+-        void beginRun('multiplayer', seed, spawnX)
+-      }, delay)
+-      return () => clearTimeout(t)
++      setCollisionMode(room?.meta.collision ?? false)
++      void beginRun('multiplayer', seed, spawnX)
++    }
++
++    const delay = startAt - offsetRef.current - Date.now()
++    if (delay < -3000) return // Start liegt weit zurück (verwaister Raum) -> nicht blind reinspringen
++    const t = setTimeout(fire, Math.max(0, delay))
++    // Hintergrund-Tabs drosseln setTimeout: beim Sichtbarwerden sofort nachholen
++    const onVisible = () => {
++      if (document.visibilityState === 'visible' && startAt - offsetRef.current - Date.now() <= 0) fire()
++    }
++    document.addEventListener('visibilitychange', onVisible)
++    return () => {
++      clearTimeout(t)
++      document.removeEventListener('visibilitychange', onVisible)
+     }
+-  }, [mpActive, phase, startAt, seed, mp.offset, mp.room, user, beginRun, setCollisionMode])
++  }, [mpActive, phase, startAt, seed, beginRun, setCollisionMode])
+ 
+   // --- Multiplayer: eigenen Crash an die Lobby melden ---
+   useEffect(() => {
+@@ -150,7 +212,7 @@ export default function App() {
+       )}
+ 
+       {/* Live-Rangliste während des Multiplayer-Rennens */}
+-      {mpActive && eng.uiState === 'playing' && <MpRanking room={mp.room} uid={user?.uid ?? null} />}
++      {mpActive && eng.uiState === 'playing' && <MpRanking room={mp.room} uid={user?.uid ?? null} offset={mp.offset} />}
+ 
+       {eng.uiState !== 'menu' && (
+         <button className="mute-btn" onClick={eng.toggleMute} aria-label="Ton an/aus">
+@@ -196,7 +258,7 @@ export default function App() {
+         />
+       )}
+       {mpActive && eng.uiState === 'gameover' && (
+-        <MultiplayerResults room={mp.room} user={user} onRematch={() => void mp.rematch()} onLeave={leaveMultiplayer} />
++        <MultiplayerResults room={mp.room} user={user} offset={mp.offset} onRematch={() => void mp.rematch()} onLeave={leaveMultiplayer} />
+       )}
+ 
+       {/* Crash-Flash */}
+diff --git a/src/firebase/config.ts b/src/firebase/config.ts
+index 405ff27..cbb77b2 100644
+--- a/src/firebase/config.ts
++++ b/src/firebase/config.ts
+@@ -1,6 +1,11 @@
+ // ===========================================================================
+ // Firebase-Initialisierung. Liest die Konfiguration aus den Umgebungsvariablen
+-// (.env.local). Exportiert die zentralen Dienste: Auth und Firestore.
++// (.env.local bzw. Vercel-Dashboard). Exportiert die zentralen Dienste:
++// Auth und Firestore.
++//
++// Fehlende Variablen werden VOR initializeApp geprüft: getAuth() würde sonst
++// synchron während der Modul-Evaluierung werfen — Ergebnis wäre ein leerer
++// weißer Screen ohne jeden Hinweis (React mountet nie).
+ // ===========================================================================
+ 
+ import { initializeApp } from 'firebase/app'
+@@ -14,10 +19,21 @@ const firebaseConfig = {
+   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+   appId: import.meta.env.VITE_FIREBASE_APP_ID,
+-  // Für Multiplayer (Realtime Database). Leer lassen, wenn nicht genutzt.
++  // Für Multiplayer (Realtime Database) erforderlich.
+   databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
+ }
+ 
++const REQUIRED: Array<keyof typeof firebaseConfig> = ['apiKey', 'authDomain', 'projectId', 'appId']
++const missing = REQUIRED.filter((k) => !firebaseConfig[k])
++if (missing.length > 0) {
++  const msg = `Firebase-Konfiguration unvollständig: ${missing.map((k) => 'VITE_FIREBASE_' + k.replace(/[A-Z]/g, (c) => '_' + c).toUpperCase()).join(', ')} fehlt. Umgebungsvariablen im Vercel-Dashboard (bzw. .env.local) prüfen.`
++  const root = document.getElementById('root')
++  if (root) {
++    root.innerHTML = `<div style="color:#fff;font-family:system-ui;padding:40px;text-align:center"><h2>⚠️ Konfigurationsfehler</h2><p>${msg}</p></div>`
++  }
++  throw new Error(msg)
++}
++
+ export const app = initializeApp(firebaseConfig)
+ export const auth = getAuth(app)
+ export const db = getFirestore(app)
+diff --git a/src/firebase/ghosts.ts b/src/firebase/ghosts.ts
+index 34504b8..7e65cc6 100644
+--- a/src/firebase/ghosts.ts
++++ b/src/firebase/ghosts.ts
+@@ -11,12 +11,28 @@ import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore'
+ import type { GhostData } from '../game/ghost'
+ import { db } from './config'
+ 
+-/** Lädt den besten Geist des Tages (oder null, wenn es noch keinen gibt). */
++/**
++ * Lädt den besten Geist des Tages (oder null, wenn es noch keinen gibt).
++ * Defensiv validiert — ein kaputtes/manipuliertes Dokument darf die Wiedergabe
++ * nicht zerlegen (Division durch interval, Index-Zugriffe auf die Listen).
++ */
+ export async function fetchDailyGhost(seed: number): Promise<GhostData | null> {
+   const ref = doc(db, 'dailyGhosts', String(seed))
+   const snap = await getDoc(ref)
+   if (!snap.exists()) return null
+   const d = snap.data()
++  if (
++    typeof d.interval !== 'number' ||
++    !(d.interval > 0) ||
++    !Array.isArray(d.xs) ||
++    !Array.isArray(d.ys) ||
++    !Array.isArray(d.zs) ||
++    d.xs.length === 0 ||
++    d.xs.length !== d.ys.length ||
++    d.xs.length !== d.zs.length
++  ) {
++    return null
++  }
+   return {
+     seed: d.seed,
+     score: d.score,
+@@ -31,6 +47,8 @@ export async function fetchDailyGhost(seed: number): Promise<GhostData | null> {
+ /**
+  * Speichert den Geist als Tagesbesten, falls sein Score höher ist als der
+  * bisher gespeicherte. Gibt true zurück, wenn gespeichert wurde.
++ * Verliert er das Rennen gegen einen fast gleichzeitigen besseren Lauf
++ * (Check und Write sind nicht atomar), ist das kein Fehler -> false.
+  */
+ export async function saveDailyGhost(user: User, ghost: GhostData): Promise<boolean> {
+   const ref = doc(db, 'dailyGhosts', String(ghost.seed))
+@@ -38,16 +56,21 @@ export async function saveDailyGhost(user: User, ghost: GhostData): Promise<bool
+   const prev = existing.exists() ? ((existing.data().score as number) ?? 0) : 0
+   if (ghost.score <= prev) return false
+ 
+-  await setDoc(ref, {
+-    uid: user.uid,
+-    name: user.displayName ?? 'Anonym',
+-    seed: ghost.seed,
+-    score: ghost.score,
+-    interval: ghost.interval,
+-    xs: ghost.xs,
+-    ys: ghost.ys,
+-    zs: ghost.zs,
+-    createdAt: serverTimestamp(),
+-  })
++  try {
++    await setDoc(ref, {
++      uid: user.uid,
++      name: (user.displayName ?? 'Anonym').slice(0, 64),
++      seed: ghost.seed,
++      score: ghost.score,
++      interval: ghost.interval,
++      xs: ghost.xs,
++      ys: ghost.ys,
++      zs: ghost.zs,
++      createdAt: serverTimestamp(),
++    })
++  } catch (e) {
++    if ((e as { code?: string })?.code === 'permission-denied') return false
++    throw e
++  }
+   return true
+ }
+diff --git a/src/firebase/multiplayer.ts b/src/firebase/multiplayer.ts
+index 95f2d9f..84ca7fa 100644
+--- a/src/firebase/multiplayer.ts
++++ b/src/firebase/multiplayer.ts
+@@ -4,14 +4,21 @@
+ // Raum-Struktur:
+ //   rooms/<code>/
+ //     meta/    { host, seed, state: 'lobby'|'countdown', startAt, createdAt }
+-//     players/<uid>/ { uid, name, photoURL, ready, x, y, z, alive, score, finished, finalScore }
++//     players/<uid>/ { uid, name, photoURL, ready, x, y, z, alive, score,
++//                      finished, finalScore, t, vz }
+ //
+ // Synchroner Start: Der Host schreibt eine absolute Startzeit (startAt) in
+ // Server-Zeit. Alle Clients rechnen über den Server-Offset in ihre lokale Zeit
+ // um -> alle starten gleichzeitig.
+ //
++// Positions-Sync mit Dead Reckoning: Jedes Progress-Update trägt einen
++// Server-Zeitstempel (t, via serverTimestamp) und die aktuelle Vorwärts-
++// geschwindigkeit (vz). Empfänger extrapolieren damit die echte Position —
++// ohne das sieht jeder Client den Gegner um Latenz × Tempo hinter sich.
++//
+ // "rooms" wird nur per geheimem Code referenziert; aufräumen erfolgt über
+-// onDisconnect (Spieler verschwindet bei Verbindungsabbruch).
++// onDisconnect (Spieler verschwindet bei Verbindungsabbruch). Verlässt der
++// letzte Spieler (Host) den Raum, wird der ganze Raum gelöscht.
+ // ===========================================================================
+ 
+ import type { User } from 'firebase/auth'
+@@ -21,6 +28,12 @@ import { app } from './config'
+ 
+ export type RoomPhase = 'lobby' | 'countdown'
+ 
++/** Räume älter als 24 h gelten als verwaist und sind nicht mehr beitretbar. */
++const ROOM_TTL_MS = 24 * 60 * 60 * 1000
++
++/** Spieler ohne Progress-Update seit dieser Zeit gelten als abwesend (Tab zu o.ä.). */
++export const STALE_MS = 15000
++
+ export interface RoomMeta {
+   host: string
+   seed: number
+@@ -42,6 +55,10 @@ export interface RoomPlayer {
+   score?: number
+   finished?: boolean
+   finalScore?: number
++  /** Server-Zeitstempel des letzten Progress-Updates (ms). */
++  t?: number
++  /** Vorwärtsgeschwindigkeit beim letzten Update (units/s, für Extrapolation). */
++  vz?: number
+ }
+ 
+ export interface RoomState {
+@@ -50,13 +67,60 @@ export interface RoomState {
+   players: Record<string, RoomPlayer>
+ }
+ 
++export type JoinResult = 'ok' | 'not-found' | 'running' | 'expired'
++
+ // Realtime Database wird erst bei Bedarf initialisiert (braucht databaseURL).
++// Beim ersten Zugriff wird außerdem der Server-Zeit-Offset dauerhaft beobachtet.
+ let _db: Database | null = null
++let offsetValue = 0
++let offsetReady: Promise<number> | null = null
++
+ function db(): Database {
+-  if (!_db) _db = getDatabase(app)
++  if (!_db) {
++    _db = getDatabase(app)
++    offsetReady = new Promise((resolve) => {
++      let done = false
++      const finish = () => {
++        if (!done) {
++          done = true
++          resolve(offsetValue)
++        }
++      }
++      // ".info/serverTimeOffset" ist ein client-lokaler Spezialwert und nur über
++      // einen Listener lesbar. Der Listener bleibt aktiv, damit der Offset auch
++      // nach Reconnects aktuell bleibt.
++      onValue(ref(_db!, '.info/serverTimeOffset'), (snap) => {
++        offsetValue = (snap.val() as number) ?? 0
++        finish()
++      })
++      setTimeout(finish, 2000) // Fallback, falls kein Wert kommt
++    })
++  }
+   return _db
+ }
+ 
++/** Wartet auf den ersten Server-Zeit-Offset (Server-Zeit ≈ Date.now() + offset). */
++export function getServerOffset(): Promise<number> {
++  db()
++  return offsetReady!
++}
++
++/** Aktuell bekannter Server-Zeit-Offset (live aktualisiert). */
++export function currentServerOffset(): number {
++  db()
++  return offsetValue
++}
++
++/** Geschätzte aktuelle Server-Zeit in ms. */
++export function serverNow(): number {
++  return Date.now() + currentServerOffset()
++}
++
++/** True, wenn ein Spieler mitten im Lauf seit STALE_MS nichts mehr gesendet hat. */
++export function isStale(p: RoomPlayer, now: number): boolean {
++  return !p.finished && typeof p.t === 'number' && now - p.t > STALE_MS
++}
++
+ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // ohne 0/O/1/I
+ function generateRoomCode(): string {
+   let c = ''
+@@ -67,7 +131,7 @@ function generateRoomCode(): string {
+ function newPlayer(user: User): RoomPlayer {
+   return {
+     uid: user.uid,
+-    name: user.displayName ?? 'Spieler',
++    name: (user.displayName ?? 'Spieler').slice(0, 80),
+     photoURL: user.photoURL ?? null,
+     ready: false,
+     x: 0,
+@@ -80,59 +144,118 @@ function newPlayer(user: User): RoomPlayer {
+   }
+ }
+ 
++/**
++ * Wandelt rohe RTDB-Spielerdaten in garantiert vollständige RoomPlayer um.
++ * Teil-Knoten OHNE uid-Feld (entstehen, wenn ein update() einen bereits
++ * gelöschten Spieler "wiederbelebt", z.B. Revanche-Reset vs. gleichzeitiges
++ * Verlassen) werden komplett verworfen — sie haben keinen echten Client mehr.
++ * Die uid wird autoritativ aus dem DB-Schlüssel übernommen.
++ */
++function normalizePlayers(raw: unknown): Record<string, RoomPlayer> {
++  const out: Record<string, RoomPlayer> = {}
++  if (!raw || typeof raw !== 'object') return out
++  for (const [key, val] of Object.entries(raw as Record<string, Partial<RoomPlayer> | null>)) {
++    if (!val || typeof val !== 'object' || typeof val.uid !== 'string') continue
++    out[key] = { name: 'Spieler', photoURL: null, ready: false, ...val, uid: key }
++  }
++  return out
++}
++
++// onDisconnect gilt pro Verbindung — nach einem Reconnect muss es neu scharf
++// gestellt werden, sonst bleibt der Spieler beim nächsten Abbruch als Leiche
++// im Raum. Der .info/connected-Listener erledigt das automatisch.
++let presenceUnsub: (() => void) | null = null
++
+ function setupDisconnect(code: string, uid: string) {
+-  // Spieler automatisch entfernen, wenn die Verbindung abbricht
+-  onDisconnect(ref(db(), `rooms/${code}/players/${uid}`)).remove()
++  clearPresence()
++  const playerRef = ref(db(), `rooms/${code}/players/${uid}`)
++  presenceUnsub = onValue(ref(db(), '.info/connected'), (snap) => {
++    if (snap.val() === true) void onDisconnect(playerRef).remove()
++  })
++}
++
++function clearPresence() {
++  presenceUnsub?.()
++  presenceUnsub = null
+ }
+ 
+-/** Erstellt einen neuen Raum und tritt ihm bei. Gibt den Raum-Code zurück. */
++/**
++ * Erstellt einen neuen Raum und tritt ihm bei. Gibt den Raum-Code zurück.
++ * Bei Code-Kollision lehnen die Rules das Überschreiben ab -> neuen Code probieren.
++ */
+ export async function createRoom(user: User): Promise<string> {
+-  const code = generateRoomCode()
+-  await set(ref(db(), `rooms/${code}`), {
+-    meta: { host: user.uid, seed: randomSeed(), state: 'lobby', collision: false, createdAt: serverTimestamp() },
+-    players: { [user.uid]: newPlayer(user) },
+-  })
+-  setupDisconnect(code, user.uid)
+-  return code
++  let lastErr: unknown = null
++  for (let attempt = 0; attempt < 5; attempt++) {
++    const code = generateRoomCode()
++    try {
++      await set(ref(db(), `rooms/${code}`), {
++        meta: { host: user.uid, seed: randomSeed(), state: 'lobby', collision: false, createdAt: serverTimestamp() },
++        players: { [user.uid]: newPlayer(user) },
++      })
++      setupDisconnect(code, user.uid)
++      return code
++    } catch (e) {
++      lastErr = e
++    }
++  }
++  throw lastErr
+ }
+ 
+-/** Tritt einem bestehenden Raum bei. Gibt false zurück, wenn er nicht existiert. */
+-export async function joinRoom(code: string, user: User): Promise<boolean> {
++/** Tritt einem bestehenden Raum bei (nur in der Lobby-Phase möglich). */
++export async function joinRoom(code: string, user: User): Promise<JoinResult> {
+   const metaSnap = await get(ref(db(), `rooms/${code}/meta`))
+-  if (!metaSnap.exists()) return false
++  if (!metaSnap.exists()) return 'not-found'
++  const meta = metaSnap.val() as RoomMeta
++  if (typeof meta.createdAt === 'number' && serverNow() - meta.createdAt > ROOM_TTL_MS) return 'expired'
++  if (meta.state !== 'lobby') return 'running'
+   await set(ref(db(), `rooms/${code}/players/${user.uid}`), newPlayer(user))
+   setupDisconnect(code, user.uid)
+-  return true
++  return 'ok'
+ }
+ 
+-/** Verlässt den Raum (entfernt den eigenen Spieler-Knoten). */
++/**
++ * Verlässt den Raum. Ist der Gehende der Host, wandert die Host-Rolle an den
++ * (stabil) ersten verbleibenden Spieler; als letzter Spieler löscht er den Raum.
++ */
+ export async function leaveRoom(code: string, uid: string): Promise<void> {
+-  await remove(ref(db(), `rooms/${code}/players/${uid}`))
+-}
+-
+-/** Setzt den eigenen Bereit-Status. */
+-export async function setReady(code: string, uid: string, ready: boolean): Promise<void> {
+-  await update(ref(db(), `rooms/${code}/players/${uid}`), { ready })
++  clearPresence()
++  const playerRef = ref(db(), `rooms/${code}/players/${uid}`)
++  try {
++    const snap = await get(ref(db(), `rooms/${code}`))
++    if (snap.exists()) {
++      const room = snap.val() as { meta?: RoomMeta; players?: Record<string, unknown> }
++      const remaining = Object.keys(room.players ?? {})
++        .filter((k) => k !== uid)
++        .sort()
++      if (room.meta?.host === uid) {
++        if (remaining.length === 0) {
++          // Letzter Spieler: ganzen Raum aufräumen (Rules erlauben Host-Delete)
++          await onDisconnect(playerRef).cancel().catch(() => {})
++          await remove(ref(db(), `rooms/${code}`))
++          return
++        }
++        // Host-Rolle übergeben, damit der Raum startfähig bleibt
++        await update(ref(db(), `rooms/${code}/meta`), { host: remaining[0] }).catch(() => {})
++      }
++    }
++  } catch {
++    // best effort — zur Not nur den eigenen Knoten entfernen
++  }
++  await remove(playerRef)
++  await onDisconnect(playerRef).cancel().catch(() => {})
+ }
+ 
+ /**
+- * Liest den Server-Zeit-Offset (Server-Zeit ≈ Date.now() + offset).
+- * Hinweis: ".info/serverTimeOffset" ist ein client-lokaler Spezialwert und nur
+- * über einen Listener (onValue) lesbar, NICHT über get(). Daher onlyOnce-Listener
+- * mit Sicherheits-Fallback.
++ * Übernimmt die Host-Rolle (wenn der eingetragene Host den Raum verlassen hat,
++ * z.B. per Verbindungsabbruch ohne sauberes leaveRoom).
+  */
+-export function getServerOffset(): Promise<number> {
+-  return new Promise((resolve) => {
+-    let done = false
+-    const finish = (v: number) => {
+-      if (!done) {
+-        done = true
+-        resolve(v)
+-      }
+-    }
+-    onValue(ref(db(), '.info/serverTimeOffset'), (snap) => finish((snap.val() as number) ?? 0), { onlyOnce: true })
+-    setTimeout(() => finish(0), 2000) // Fallback, falls kein Wert kommt
+-  })
++export async function claimHost(code: string, uid: string): Promise<void> {
++  await update(ref(db(), `rooms/${code}/meta`), { host: uid }).catch(() => {})
++}
++
++/** Setzt den eigenen Bereit-Status. */
++export async function setReady(code: string, uid: string, ready: boolean): Promise<void> {
++  await update(ref(db(), `rooms/${code}/players/${uid}`), { ready }).catch(() => {})
+ }
+ 
+ /** Host: schaltet den Kollisionsmodus (Bumper) für den Raum um. */
+@@ -147,36 +270,52 @@ export async function startCountdown(code: string): Promise<void> {
+   await update(ref(db(), `rooms/${code}/meta`), { state: 'countdown', startAt })
+ }
+ 
+-/** Schreibt die aktuelle Position/Score (gedrosselt vom Aufrufer aufrufen). */
+-export async function pushProgress(code: string, uid: string, p: { x: number; y: number; z: number; alive: boolean; score: number }): Promise<void> {
+-  await update(ref(db(), `rooms/${code}/players/${uid}`), p)
++/**
++ * Schreibt die aktuelle Position/Score (gedrosselt vom Aufrufer aufrufen).
++ * t wird serverseitig gestempelt -> Empfänger können das Alter des Updates
++ * unabhängig von der Uhr des Senders bestimmen. Fehler (z.B. wenn der eigene
++ * Knoten gerade entfernt wurde) werden bewusst verschluckt.
++ */
++export async function pushProgress(code: string, uid: string, p: { x: number; y: number; z: number; alive: boolean; score: number; vz: number }): Promise<void> {
++  await update(ref(db(), `rooms/${code}/players/${uid}`), { ...p, t: serverTimestamp() }).catch(() => {})
+ }
+ 
+ /** Markiert den eigenen Lauf als beendet (Crash). */
+ export async function finishRace(code: string, uid: string, finalScore: number): Promise<void> {
+-  await update(ref(db(), `rooms/${code}/players/${uid}`), { finished: true, finalScore, alive: false })
+-}
+-
+-/** Host: setzt den Raum für eine neue Runde zurück (zurück in die Lobby). */
+-export async function resetRoom(code: string): Promise<RoomState | null> {
+-  const snap = await get(ref(db(), `rooms/${code}`))
+-  if (!snap.exists()) return null
+-  const room = snap.val() as RoomState
+-  const players = room.players ?? {}
+-  const updates: Record<string, unknown> = {
+-    'meta/state': 'lobby',
+-    'meta/seed': randomSeed(),
+-    'meta/startAt': null,
+-  }
+-  for (const uid of Object.keys(players)) {
+-    updates[`players/${uid}/ready`] = false
+-    updates[`players/${uid}/finished`] = false
+-    updates[`players/${uid}/finalScore`] = 0
+-    updates[`players/${uid}/alive`] = true
+-    updates[`players/${uid}/score`] = 0
++  await update(ref(db(), `rooms/${code}/players/${uid}`), { finished: true, finalScore, alive: false }).catch(() => {})
++}
++
++/**
++ * Host: setzt den Raum für eine neue Runde zurück (zurück in die Lobby).
++ * Verlässt ein Spieler den Raum zwischen Lesen und Schreiben, lehnen die
++ * gehärteten Rules das Update atomar ab (kein Wiederbeleben von Teil-Knoten)
++ * -> mit frischem Stand erneut versuchen.
++ */
++export async function resetRoom(code: string): Promise<void> {
++  for (let attempt = 0; attempt < 3; attempt++) {
++    const snap = await get(ref(db(), `rooms/${code}/players`))
++    const uids = snap.exists() ? Object.keys((snap.val() as Record<string, unknown>) ?? {}) : []
++    const updates: Record<string, unknown> = {
++      'meta/state': 'lobby',
++      'meta/seed': randomSeed(),
++      'meta/startAt': null,
++    }
++    for (const uid of uids) {
++      updates[`players/${uid}/ready`] = false
++      updates[`players/${uid}/finished`] = false
++      updates[`players/${uid}/finalScore`] = 0
++      updates[`players/${uid}/alive`] = true
++      updates[`players/${uid}/score`] = 0
++      updates[`players/${uid}/t`] = null
++      updates[`players/${uid}/vz`] = null
++    }
++    try {
++      await update(ref(db(), `rooms/${code}`), updates)
++      return
++    } catch (e) {
++      if (attempt === 2) throw e
++    }
+   }
+-  await update(ref(db(), `rooms/${code}`), updates)
+-  return room
+ }
+ 
+ /** Beobachtet den Raum-Zustand. Gibt die Unsubscribe-Funktion zurück. */
+@@ -191,7 +330,7 @@ export function watchRoom(code: string, callback: (room: RoomState | null) => vo
+     callback({
+       id: code,
+       meta: val.meta as RoomMeta,
+-      players: (val.players ?? {}) as Record<string, RoomPlayer>,
++      players: normalizePlayers(val.players),
+     })
+   })
+ }
+diff --git a/src/firebase/scores.ts b/src/firebase/scores.ts
+index 8f6b901..ac01f1c 100644
+--- a/src/firebase/scores.ts
++++ b/src/firebase/scores.ts
+@@ -10,6 +10,9 @@ import type { User } from 'firebase/auth'
+ import { collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore'
+ import { db } from './config'
+ 
++/** Rules erlauben max. 64 Zeichen — Google-Namen können länger sein. */
++const safeName = (user: User) => (user.displayName ?? 'Anonym').slice(0, 64)
++
+ export interface ScoreEntry {
+   uid: string
+   displayName: string
+@@ -31,7 +34,7 @@ export async function submitScore(user: User, score: number, mode: string, seed:
+ 
+   await setDoc(ref, {
+     uid: user.uid,
+-    displayName: user.displayName ?? 'Anonym',
++    displayName: safeName(user),
+     photoURL: user.photoURL ?? null,
+     score,
+     mode,
+@@ -60,7 +63,7 @@ export async function submitDailyScore(user: User, score: number, seed: number):
+ 
+   await setDoc(ref, {
+     uid: user.uid,
+-    displayName: user.displayName ?? 'Anonym',
++    displayName: safeName(user),
+     photoURL: user.photoURL ?? null,
+     score,
+     updatedAt: serverTimestamp(),
+diff --git a/src/game/Engine.ts b/src/game/Engine.ts
+index 60a18da..714e87c 100644
+--- a/src/game/Engine.ts
++++ b/src/game/Engine.ts
+@@ -49,6 +49,8 @@ export class Engine {
+   private mode: GameMode = 'classic'
+   private seed = 1
+   private speed = BASE_SPEED
++  private lastSentVz = 0
++  private serverOffset = 0 // Server-Zeit ≈ Date.now() + serverOffset
+   private score = 0
+   private distance = 0
+   private elapsed = 0
+@@ -96,12 +98,23 @@ export class Engine {
+     this.bundle.camera.position.set(0, 6, 12)
+     this.bundle.camera.lookAt(0, 1, 0)
+     // ein bisschen Deko im Hintergrund
+-    for (let i = 0; i < 4; i++) this.world.generateChunk(this.speed)
++    for (let i = 0; i < 4; i++) this.world.generateChunk()
++
++    // iOS/Autoplay: AudioContext darf nur synchron in einer echten Nutzergeste
++    // entsperrt werden. Multiplayer/Daily starten aber aus setTimeout/await heraus
++    // — daher hier bei jeder Geste entsperren (init/resume sind idempotent).
++    window.addEventListener('pointerdown', this.unlockAudio)
++    window.addEventListener('keydown', this.unlockAudio)
+ 
+     window.addEventListener('resize', this.onResize)
+     this.rafId = requestAnimationFrame(this.loop)
+   }
+ 
++  private unlockAudio = () => {
++    this.audio.init()
++    this.audio.resume()
++  }
++
+   // ----------------------------- Öffentliche API -----------------------------
+ 
+   /** Setzt die Geister, die beim nächsten start() abgespielt werden. */
+@@ -116,7 +129,12 @@ export class Engine {
+ 
+   /** Aktualisiert die Positionen der Mitspieler (Multiplayer, von React). */
+   updateRemotePlayers(states: RemoteState[]) {
+-    this.remotePlayers.setTargets(states)
++    this.remotePlayers.setTargets(states, Date.now() + this.serverOffset)
++  }
++
++  /** Setzt den Server-Zeit-Offset (für die Extrapolation der Mitspieler). */
++  setServerOffset(offset: number) {
++    this.serverOffset = offset
+   }
+ 
+   /** Zuschauer-Modus: Kamera folgt dem führenden Mitspieler (nach eigenem Crash). */
+@@ -138,6 +156,7 @@ export class Engine {
+     this.seed = seed
+     this.mode = mode
+     this.speed = BASE_SPEED
++    this.lastSentVz = 0
+     this.score = 0
+     this.distance = 0
+     this.elapsed = 0
+@@ -169,7 +188,7 @@ export class Engine {
+     this.resetFloor()
+ 
+     // Anfangs-Strecke deterministisch vorab erzeugen
+-    this.world.fillAhead(0, SPAWN_AHEAD, this.speed)
++    this.world.fillAhead(0, SPAWN_AHEAD)
+ 
+     this.state = 'playing'
+     this.reportScore(true)
+@@ -178,10 +197,17 @@ export class Engine {
+   /** Zurück ins Menü (rotierender Cube). */
+   toMenu() {
+     this.state = 'menu'
++    this.spectating = false
++    this.camShake = 0
+     this.player.setVisible(true)
+     this.player.reset()
+     this.ghostPlayer.clear()
+     this.remotePlayers.clear()
++    // Boden/Welt zurück zum Ursprung — die Menü-Kamera schaut fest auf z≈0;
++    // ohne Reset stünden Boden-Segmente noch an der Z-Position des letzten Laufs.
++    this.resetFloor()
++    this.world.reset(this.seed)
++    for (let i = 0; i < 4; i++) this.world.generateChunk()
+   }
+ 
+   setMuted(muted: boolean) {
+@@ -192,6 +218,8 @@ export class Engine {
+     cancelAnimationFrame(this.rafId)
+     if (this.goTimer) clearTimeout(this.goTimer)
+     this.input.detach()
++    window.removeEventListener('pointerdown', this.unlockAudio)
++    window.removeEventListener('keydown', this.unlockAudio)
+     window.removeEventListener('resize', this.onResize)
+     this.bundle.renderer.dispose()
+     if (this.canvas.parentElement === this.container) this.container.removeChild(this.canvas)
+@@ -229,10 +257,15 @@ export class Engine {
+     this.lastT = now
+     if (dt > 0.05) dt = 0.05
+ 
+-    if (this.state === 'playing') this.update(dt)
+-    this.updateVisualsAlways(dt)
+-
+-    this.bundle.renderer.render(this.bundle.scene, this.bundle.camera)
++    // Ein einzelner Fehler (z.B. aus einem Callback) darf die rAF-Schleife
++    // nicht dauerhaft töten — sonst friert das ganze Spiel ein.
++    try {
++      if (this.state === 'playing') this.update(dt)
++      this.updateVisualsAlways(dt)
++      this.bundle.renderer.render(this.bundle.scene, this.bundle.camera)
++    } catch (e) {
++      console.error('Engine-Frame fehlgeschlagen:', e)
++    }
+     this.rafId = requestAnimationFrame(this.loop)
+   }
+ 
+@@ -247,6 +280,7 @@ export class Engine {
+     // vorwärts (Welt-Z nimmt ab)
+     const dz = curSpeed * dt
+     const p = this.player.position
++    const prevZ = p.z // für Swept-Kollision (Tunneling bei hohem Tempo/niedriger FPS)
+     p.z -= dz
+     this.distance += dz
+     this.score += dz
+@@ -271,7 +305,7 @@ export class Engine {
+     this.player.emitTrail()
+ 
+     // Strecke nachfüllen
+-    this.world.fillAhead(p.z, SPAWN_AHEAD, this.speed)
++    this.world.fillAhead(p.z, SPAWN_AHEAD)
+ 
+     // Hindernisse: Despawn + Kollision
+     for (let i = this.world.obstacles.length - 1; i >= 0; i--) {
+@@ -280,7 +314,7 @@ export class Engine {
+         this.world.removeObstacle(i)
+         continue
+       }
+-      if (this.hitTest(o.mesh.position, o.hw, o.hh, o.hd)) {
++      if (this.hitTest(o.mesh.position, o.hw, o.hh, o.hd, prevZ)) {
+         if (this.player.isInvincible) {
+           // unverwundbar: Hindernis zerschmettern statt sterben
+           this.audio.smash()
+@@ -293,7 +327,8 @@ export class Engine {
+       }
+     }
+ 
+-    // Kristalle: Einsammeln + Despawn
++    // Kristalle: Einsammeln + Despawn (z-Abstand zum im Frame durchfahrenen
++    // Intervall [p.z, prevZ], sonst werden Kristalle bei hohem Tempo übersprungen)
+     for (let i = this.world.crystals.length - 1; i >= 0; i--) {
+       const c = this.world.crystals[i]
+       if (c.mesh.position.z > p.z + DESPAWN_BACK) {
+@@ -302,7 +337,8 @@ export class Engine {
+       }
+       const dx = p.x - c.mesh.position.x
+       const dy = p.y - c.mesh.position.y
+-      const dzc = p.z - c.mesh.position.z
++      const nearestZ = Math.max(p.z, Math.min(prevZ, c.mesh.position.z))
++      const dzc = nearestZ - c.mesh.position.z
+       if (dx * dx + dy * dy + dzc * dzc < 1.7 * 1.7) {
+         this.collectCrystal(c)
+         this.world.removeCrystal(i)
+@@ -328,12 +364,17 @@ export class Engine {
+     this.audio.beat(dt, this.speed)
+     this.reportScore(false)
+ 
+-    // Multiplayer: eigene Position gedrosselt (~12 Hz) nach außen melden
++    // Multiplayer: eigene Position gedrosselt (~12 Hz) nach außen melden.
++    // Bei Tempo-Sprüngen (Boost an/aus) sofort senden, damit die Extrapolation
++    // der anderen Clients nicht mit veraltetem vz weiterrechnet.
+     if (this.mode === 'multiplayer') {
+       this.progressAcc += dt
+-      if (this.progressAcc >= 1 / 12) {
+-        this.progressAcc = 0
+-        this.callbacks.onProgress?.({ x: p.x, y: p.y, z: p.z, alive: true, score: Math.floor(this.score) })
++      const speedJump = Math.abs(curSpeed - this.lastSentVz) > 4
++      if (this.progressAcc >= 1 / 12 || speedJump) {
++        this.progressAcc -= 1 / 12
++        if (this.progressAcc < 0 || speedJump) this.progressAcc = 0
++        this.lastSentVz = curSpeed
++        this.callbacks.onProgress?.({ x: p.x, y: p.y, z: p.z, alive: true, score: Math.floor(this.score), vz: curSpeed })
+       }
+     }
+   }
+@@ -351,7 +392,7 @@ export class Engine {
+ 
+     this.player.updateTrail(dt)
+     this.particles.update(dt)
+-    this.remotePlayers.update(dt) // Mitspieler flüssig interpolieren
++    this.remotePlayers.update(dt, Date.now() + this.serverOffset) // Mitspieler extrapolieren + glätten
+ 
+     // Kamera-Shake
+     if (this.camShake > 0) {
+@@ -397,12 +438,17 @@ export class Engine {
+ 
+   // ----------------------------- Helfer -----------------------------
+ 
+-  private hitTest(o: THREE.Vector3, hw: number, hh: number, hd: number): boolean {
++  /**
++   * Kollisionstest mit Swept-Z: geprüft wird das gesamte im Frame durchfahrene
++   * Z-Intervall [p.z, prevZ], nicht nur die Endposition — sonst tunnelt der
++   * Spieler bei hohem Tempo/niedriger Framerate durch schmale Hindernisse.
++   */
++  private hitTest(o: THREE.Vector3, hw: number, hh: number, hd: number, prevZ: number): boolean {
+     const p = this.player.position
+     const phw = 0.5,
+       phh = 0.5,
+       phd = 0.5 // etwas kleiner als Cube -> fairer
+-    return Math.abs(p.x - o.x) < phw + hw && Math.abs(p.y - o.y) < phh + hh && Math.abs(p.z - o.z) < phd + hd
++    return Math.abs(p.x - o.x) < phw + hw && Math.abs(p.y - o.y) < phh + hh && p.z < o.z + phd + hd && prevZ > o.z - phd - hd
+   }
+ 
+   /** Wendet die Wirkung eines eingesammelten Kristalls an (Score, Turbo, Stern). */
+@@ -474,9 +520,8 @@ export class Engine {
+    * Hindernisse nachgenerieren + despawnen, Kristalle einsammeln, die er berührt.
+    * Funktioniert, weil alle Spieler denselben Seed (= dasselbe Level) haben.
+    */
+-  private spectateWorld(dt: number, target: THREE.Vector3) {
+-    this.speed = Math.min(MAX_SPEED, this.speed + SPEED_RAMP * dt)
+-    this.world.fillAhead(target.z, SPAWN_AHEAD, this.speed)
++  private spectateWorld(_dt: number, target: THREE.Vector3) {
++    this.world.fillAhead(target.z, SPAWN_AHEAD)
+ 
+     for (let i = this.world.obstacles.length - 1; i >= 0; i--) {
+       if (this.world.obstacles[i].mesh.position.z > target.z + DESPAWN_BACK) this.world.removeObstacle(i)
+diff --git a/src/game/ghost.ts b/src/game/ghost.ts
+index d5c40bc..9496bb4 100644
+--- a/src/game/ghost.ts
++++ b/src/game/ghost.ts
+@@ -25,9 +25,12 @@ export interface GhostData {
+ 
+ const round2 = (n: number) => Math.round(n * 100) / 100
+ 
++/** Maximale Sample-Anzahl — muss zum Limit in den Firestore-Rules passen. */
++const MAX_SAMPLES = 6000
++
+ /** Zeichnet während eines Laufs die Spielerposition in festen Intervallen auf. */
+ export class GhostRecorder {
+-  readonly interval = 1 / 12
++  private interval = 1 / 12
+   private acc = 0
+   private xs: number[] = []
+   private ys: number[] = []
+@@ -35,6 +38,7 @@ export class GhostRecorder {
+ 
+   reset() {
+     this.acc = 0
++    this.interval = 1 / 12
+     this.xs = []
+     this.ys = []
+     this.zs = []
+@@ -47,6 +51,16 @@ export class GhostRecorder {
+       this.xs.push(round2(x))
+       this.ys.push(round2(y))
+       this.zs.push(round2(z))
++      // Sehr lange Läufe würden das Rules-Limit sprengen und der Upload schlüge
++      // fehl: adaptiv ausdünnen (jedes 2. Sample raus, Intervall verdoppeln).
++      if (this.xs.length >= MAX_SAMPLES) {
++        const keep = (_v: number, i: number) => i % 2 === 0
++        this.xs = this.xs.filter(keep)
++        this.ys = this.ys.filter(keep)
++        this.zs = this.zs.filter(keep)
++        this.interval *= 2
++        this.acc = 0
++      }
+     }
+   }
+ 
+diff --git a/src/game/input.ts b/src/game/input.ts
+index e02470b..8caf835 100644
+--- a/src/game/input.ts
++++ b/src/game/input.ts
+@@ -11,6 +11,12 @@ export interface InputCallbacks {
+   onMute: () => void
+ }
+ 
++/** Events aus Eingabefeldern (z.B. Raumcode-Input) gehören nicht dem Spiel. */
++function isEditableTarget(e: Event): boolean {
++  const t = e.target as HTMLElement | null
++  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
++}
++
+ export class InputManager {
+   private keys: Record<string, boolean> = {}
+   private touchTargetDir = 0
+@@ -22,20 +28,29 @@ export class InputManager {
+ 
+   attach(canvas: HTMLElement) {
+     this.canvas = canvas
++    // Browser-Gesten (Scroll/Pan/Doppeltipp-Zoom) auf dem Spielfeld unterbinden,
++    // sonst beendet der Browser Wischgesten mit pointercancel.
++    canvas.style.touchAction = 'none'
+     window.addEventListener('keydown', this.onKeyDown)
+     window.addEventListener('keyup', this.onKeyUp)
++    window.addEventListener('blur', this.onWindowBlur)
+     canvas.addEventListener('pointerdown', this.onPointerDown)
+     canvas.addEventListener('pointermove', this.onPointerMove)
+     canvas.addEventListener('pointerup', this.onPointerUp)
++    canvas.addEventListener('pointercancel', this.onPointerCancel)
++    canvas.addEventListener('lostpointercapture', this.onPointerCancel)
+   }
+ 
+   detach() {
+     window.removeEventListener('keydown', this.onKeyDown)
+     window.removeEventListener('keyup', this.onKeyUp)
++    window.removeEventListener('blur', this.onWindowBlur)
+     if (this.canvas) {
+       this.canvas.removeEventListener('pointerdown', this.onPointerDown)
+       this.canvas.removeEventListener('pointermove', this.onPointerMove)
+       this.canvas.removeEventListener('pointerup', this.onPointerUp)
++      this.canvas.removeEventListener('pointercancel', this.onPointerCancel)
++      this.canvas.removeEventListener('lostpointercapture', this.onPointerCancel)
+     }
+   }
+ 
+@@ -61,7 +76,7 @@ export class InputManager {
+   }
+ 
+   private onKeyDown = (e: KeyboardEvent) => {
+-    if (e.repeat) return
++    if (e.repeat || isEditableTarget(e)) return
+     const k = e.key.toLowerCase()
+     this.keys[k] = true
+     if (k === ' ' || k === 'arrowup' || k === 'w') {
+@@ -73,12 +88,27 @@ export class InputManager {
+   }
+ 
+   private onKeyUp = (e: KeyboardEvent) => {
++    if (isEditableTarget(e)) return
+     this.keys[e.key.toLowerCase()] = false
+   }
+ 
++  private onWindowBlur = () => {
++    // Fokusverlust (Alt-Tab, Overlay): gedrückte Tasten/Gesten nicht hängen lassen
++    this.keys = {}
++    this.touchTargetDir = 0
++    this.touchStartX = null
++  }
++
+   private onPointerDown = (e: PointerEvent) => {
+     this.touchStartX = e.clientX
+     this.touchMoved = false
++    this.touchTargetDir = 0
++    // move/up auch außerhalb des Canvas weiterbekommen (Maus zieht raus etc.)
++    try {
++      ;(e.target as Element | null)?.setPointerCapture?.(e.pointerId)
++    } catch {
++      // ältere Browser ohne Pointer Capture — unkritisch
++    }
+   }
+ 
+   private onPointerMove = (e: PointerEvent) => {
+@@ -91,8 +121,16 @@ export class InputManager {
+   }
+ 
+   private onPointerUp = () => {
+-    if (!this.touchMoved) this.cb.onJump() // Tap = Sprung
++    if (this.touchStartX !== null && !this.touchMoved) this.cb.onJump() // Tap = Sprung
+     this.touchStartX = null
+     this.touchTargetDir = 0
+   }
++
++  private onPointerCancel = () => {
++    // Geste vom Browser/System abgebrochen: KEIN Sprung, Richtung loslassen —
++    // sonst driftet der Cube dauerhaft zur Seite.
++    this.touchStartX = null
++    this.touchTargetDir = 0
++    this.touchMoved = false
++  }
+ }
+diff --git a/src/game/remote.ts b/src/game/remote.ts
+index dba835b..14fe214 100644
+--- a/src/game/remote.ts
++++ b/src/game/remote.ts
+@@ -2,9 +2,14 @@
+ // RemotePlayers — zeigt die Mitspieler im Multiplayer als farbige Cubes,
+ // inklusive nachziehender Leucht-Spur (wie der eigene Cube).
+ //
+-// Die Netzwerk-Updates kommen nur ~12×/Sekunde an. Damit die Bewegung flüssig
+-// aussieht, wird pro Frame sanft zur zuletzt empfangenen Zielposition
+-// interpoliert (lerp). Jeder Spieler bekommt anhand seiner uid eine feste Farbe.
++// Die Netzwerk-Updates kommen nur ~12×/Sekunde an und sind durch Latenz
++// zusätzlich veraltet. Damit der Gegner an seiner ECHTEN Position erscheint
++// (und nicht um Latenz × Tempo nach hinten versetzt), wird per Dead Reckoning
++// extrapoliert: jedes Update trägt einen Server-Zeitstempel (t) und die
++// Vorwärtsgeschwindigkeit (vz); pro Frame gilt z ≈ z_paket - vz * Alter.
++// Der Korrektursprung bei Paketankunft wird weich abgebaut (kein Ruckeln),
++// x/y werden klassisch gelerpt. Jeder Spieler bekommt anhand seiner uid eine
++// feste Farbe.
+ // ===========================================================================
+ 
+ import * as THREE from 'three'
+@@ -15,10 +20,23 @@ export interface RemoteState {
+   y: number
+   z: number
+   alive: boolean
++  /** Server-Zeitstempel des Updates (ms), fehlt bei Lobby-Initialdaten. */
++  t?: number
++  /** Vorwärtsgeschwindigkeit (units/s) zum Zeitpunkt des Updates. */
++  vz?: number
+ }
+ 
+ const TRAIL_N = 14
+ 
++/** Extrapolation höchstens so weit in die Zukunft (Sender-Stall/Uhrfehler-Schutz). */
++const MAX_EXTRAPOLATE_S = 0.5
++
++// Geteilte Geometrien — werden nie entsorgt, aber auch nur einmal angelegt.
++const CUBE_GEO = new THREE.BoxGeometry(1.1, 1.1, 1.1)
++const CUBE_EDGES_GEO = new THREE.EdgesGeometry(CUBE_GEO)
++const TRAIL_GEO = new THREE.BoxGeometry(1, 1, 1)
++const EDGE_MAT = new THREE.LineBasicMaterial({ color: 0xffffff })
++
+ interface TrailBit {
+   mesh: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>
+   life: number
+@@ -26,7 +44,10 @@ interface TrailBit {
+ 
+ interface Entry {
+   mesh: THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>
+-  target: THREE.Vector3
++  target: THREE.Vector3 // rohe Paket-Position
++  t: number | null
++  vz: number
++  zOffset: number // Restfehler zwischen Anzeige und Extrapolation (wird abgebaut)
+   color: THREE.Color
+   trail: TrailBit[]
+   trailIdx: number
+@@ -44,10 +65,18 @@ export class RemotePlayers {
+ 
+   constructor(private scene: THREE.Scene) {}
+ 
++  /** Extrapolierte Soll-Z-Position eines Eintrags zur Server-Zeit `serverNow`. */
++  private idealZ(entry: Entry, serverNow: number): number {
++    if (entry.t === null || entry.vz <= 0) return entry.target.z
++    const age = Math.max(0, Math.min(MAX_EXTRAPOLATE_S, (serverNow - entry.t) / 1000))
++    return entry.target.z - entry.vz * age // vorwärts = Welt-Z nimmt ab
++  }
++
+   /** Übernimmt die neuesten Positionen aller Mitspieler. */
+-  setTargets(states: RemoteState[]) {
++  setTargets(states: RemoteState[], serverNow: number) {
+     const seen = new Set<string>()
+     for (const s of states) {
++      if (!s.uid) continue // Teil-Knoten ohne uid: niemals einen Cube dafür bauen
+       seen.add(s.uid)
+       let entry = this.map.get(s.uid)
+       const isNew = !entry
+@@ -56,8 +85,18 @@ export class RemotePlayers {
+         this.map.set(s.uid, entry)
+       }
+       entry.target.set(s.x, s.y, s.z)
++      entry.t = typeof s.t === 'number' ? s.t : null
++      entry.vz = typeof s.vz === 'number' ? s.vz : 0
+       entry.mesh.visible = s.alive
+-      if (isNew) entry.mesh.position.copy(entry.target) // nicht von (0,0,0) heranziehen
++      const iz = this.idealZ(entry, serverNow)
++      if (isNew) {
++        // nicht von (0,0,0) heranziehen
++        entry.mesh.position.set(s.x, s.y, iz)
++        entry.zOffset = 0
++      } else {
++        // Anzeige bleibt stetig: Sprung als Korrekturfehler merken und abbauen
++        entry.zOffset = entry.mesh.position.z - iz
++      }
+     }
+     // Spieler, die nicht mehr im Raum sind, entfernen
+     for (const [uid, entry] of this.map) {
+@@ -68,13 +107,19 @@ export class RemotePlayers {
+     }
+   }
+ 
+-  /** Interpolation zur Zielposition, Roll-Rotation und Spur. */
+-  update(dt: number) {
++  /** Extrapolation + Glättung zur Zielposition, Roll-Rotation und Spur. */
++  update(dt: number, serverNow: number) {
+     const f = Math.min(1, dt * 10)
+     for (const entry of this.map.values()) {
+       if (entry.mesh.visible) {
+         const beforeZ = entry.mesh.position.z
+-        entry.mesh.position.lerp(entry.target, f)
++        // x/y weich lerpen (seitliche Bewegung/Sprünge)
++        entry.mesh.position.x += (entry.target.x - entry.mesh.position.x) * f
++        entry.mesh.position.y += (entry.target.y - entry.mesh.position.y) * f
++        // z: extrapolierte Position direkt setzen, Korrekturfehler exponentiell abbauen
++        entry.zOffset *= Math.exp(-dt * 7)
++        if (Math.abs(entry.zOffset) < 0.002) entry.zOffset = 0
++        entry.mesh.position.z = this.idealZ(entry, serverNow) + entry.zOffset
+         const dz = beforeZ - entry.mesh.position.z // vorwärts = positiv
+         entry.mesh.rotation.x -= dz * 0.5 // rollt wie der echte Cube
+         this.emitTrail(entry)
+@@ -100,14 +145,16 @@ export class RemotePlayers {
+ 
+   /**
+    * Bumper-Kollision: liefert den seitlichen Versatz, um aus der Überlappung mit
+-   * nahen Mitspielern herauszuschieben (0 = keine Kollision).
++   * nahen Mitspielern herauszuschieben (0 = keine Kollision). Rechnet gegen die
++   * extrapolierte Anzeige-Position; das Längs-Fenster ist etwas großzügiger,
++   * weil trotz Dead Reckoning Jitter-Restfehler bleiben.
+    */
+   resolveCollision(px: number, pz: number, reach: number): number {
+     let push = 0
+     for (const entry of this.map.values()) {
+       if (!entry.mesh.visible) continue
+       const ep = entry.mesh.position
+-      if (Math.abs(pz - ep.z) > 1.6) continue // nur wenn längs nah genug
++      if (Math.abs(pz - ep.z) > 2.2) continue // nur wenn längs nah genug
+       const dx = px - ep.x
+       const absdx = Math.abs(dx)
+       if (absdx < reach) push += (reach - absdx) * (dx >= 0 ? 1 : -1)
+@@ -141,25 +188,29 @@ export class RemotePlayers {
+   private createCube(uid: string): Entry {
+     const color = new THREE.Color().setHSL(hashHue(uid), 0.85, 0.6)
+     const mat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.5, metalness: 0.6, roughness: 0.3 })
+-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.1, 1.1), mat)
++    const mesh = new THREE.Mesh(CUBE_GEO, mat)
+     mesh.castShadow = true
+-    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xffffff }))
++    const edges = new THREE.LineSegments(CUBE_EDGES_GEO, EDGE_MAT)
+     mesh.add(edges)
+     this.scene.add(mesh)
+ 
+     const trail: TrailBit[] = []
+     for (let i = 0; i < TRAIL_N; i++) {
+-      const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0 }))
++      const m = new THREE.Mesh(TRAIL_GEO, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0 }))
+       m.visible = false
+       this.scene.add(m)
+       trail.push({ mesh: m, life: 0 })
+     }
+ 
+-    return { mesh, target: new THREE.Vector3(), color, trail, trailIdx: 0 }
++    return { mesh, target: new THREE.Vector3(), t: null, vz: 0, zOffset: 0, color, trail, trailIdx: 0 }
+   }
+ 
+   private removeEntry(entry: Entry) {
+     this.scene.remove(entry.mesh)
+-    for (const bit of entry.trail) this.scene.remove(bit.mesh)
++    entry.mesh.material.dispose() // Geometrien sind geteilt, Materialien nicht
++    for (const bit of entry.trail) {
++      this.scene.remove(bit.mesh)
++      bit.mesh.material.dispose()
++    }
+   }
+ }
+diff --git a/src/game/rng.ts b/src/game/rng.ts
+index 8e57afb..eedb8d4 100644
+--- a/src/game/rng.ts
++++ b/src/game/rng.ts
+@@ -52,11 +52,15 @@ export class Rng {
+   }
+ }
+ 
+-/** Leitet aus dem heutigen Datum (lokal) einen stabilen Tages-Seed ab: YYYYMMDD. */
++/**
++ * Leitet aus dem heutigen UTC-Datum einen stabilen Tages-Seed ab: YYYYMMDD.
++ * UTC statt lokaler Zeit, damit weltweit alle Spieler denselben Tages-Seed
++ * (gleiches Level, gleiche Bestenliste, gleicher Geist) bekommen.
++ */
+ export function dailySeed(date = new Date()): number {
+-  const y = date.getFullYear()
+-  const m = date.getMonth() + 1
+-  const d = date.getDate()
++  const y = date.getUTCFullYear()
++  const m = date.getUTCMonth() + 1
++  const d = date.getUTCDate()
+   return y * 10000 + m * 100 + d
+ }
+ 
+diff --git a/src/game/types.ts b/src/game/types.ts
+index 616e855..7c1ae56 100644
+--- a/src/game/types.ts
++++ b/src/game/types.ts
+@@ -24,6 +24,8 @@ export interface ProgressState {
+   z: number
+   alive: boolean
+   score: number
++  /** Aktuelle Vorwärtsgeschwindigkeit (units/s) — für Dead Reckoning der Empfänger. */
++  vz: number
+ }
+ 
+ /** Callbacks, über die die Engine mit React kommuniziert (ohne React zu kennen). */
+diff --git a/src/game/world.ts b/src/game/world.ts
+index 4241063..f61b182 100644
+--- a/src/game/world.ts
++++ b/src/game/world.ts
+@@ -2,15 +2,18 @@
+ // World — verwaltet Hindernisse, Kristalle und den deterministischen
+ // Level-Generator. ALLE gameplay-relevanten Zufälle laufen hier über den
+ // Seed-RNG (rng.ts), damit gleiches Seed = gleiches Level ergibt.
++//
++// Wichtig für Multiplayer/Daily: Die Schwierigkeit wird aus der STRECKE
++// (nextSpawnZ) abgeleitet, nicht aus der lokalen Momentangeschwindigkeit —
++// die hängt von Framerate/Turbo des einzelnen Clients ab und würde die Level
++// zwischen Spielern divergieren lassen.
+ // ===========================================================================
+ 
+ import * as THREE from 'three'
+ import { Rng } from './rng'
+ import {
+-  BASE_SPEED,
+   COLORS,
+   type CrystalKind,
+-  MAX_SPEED,
+   TRACK_WIDTH,
+   type ObstacleType,
+ } from './types'
+@@ -28,6 +31,10 @@ export interface Crystal {
+   kind: CrystalKind
+ }
+ 
++/** Nach dieser Strecke (Welteinheiten) ist die Maximal-Schwierigkeit erreicht.
++ *  Entspricht grob der Distanz, nach der die Speed-Rampe früher MAX erreichte. */
++const DIFF_RAMP_DISTANCE = 1600
++
+ export class World {
+   readonly obstacles: Obstacle[] = []
+   readonly crystals: Crystal[] = []
+@@ -42,6 +49,18 @@ export class World {
+   private ultraGeo = new THREE.OctahedronGeometry(0.85)
+   private starGeo = World.makeStarGeometry()
+ 
++  // Geteilte Materialien — Spawns despawnen im Sekundentakt; individuelle
++  // Materialien ohne dispose() wären ein stetig wachsendes GPU-Leak.
++  private spikeMat = new THREE.MeshStandardMaterial({ color: 0x330011, emissive: COLORS.pink, emissiveIntensity: 1.3, metalness: 0.5, roughness: 0.3 })
++  private blockMat = new THREE.MeshStandardMaterial({ color: 0x1a0a33, emissive: COLORS.purple, emissiveIntensity: 0.9, metalness: 0.6, roughness: 0.25 })
++  private barMat = new THREE.MeshStandardMaterial({ color: 0x331a00, emissive: COLORS.yellow, emissiveIntensity: 1.1, metalness: 0.5, roughness: 0.3 })
++  private crystalMat = new THREE.MeshStandardMaterial({ color: 0x004433, emissive: COLORS.green, emissiveIntensity: 1.6, metalness: 0.3, roughness: 0.2 })
++  private ultraMat = new THREE.MeshStandardMaterial({ color: 0x4a3000, emissive: COLORS.gold, emissiveIntensity: 1.8, metalness: 0.6, roughness: 0.15 })
++  // strahlend gelb-weiß, klar unterscheidbar vom goldenen Ultra-Bonus
++  private starMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xfff4b0, emissiveIntensity: 2.2, metalness: 0.4, roughness: 0.1 })
++  private blockEdgesGeo = new THREE.EdgesGeometry(this.blockGeo)
++  private blockEdgesMat = new THREE.LineBasicMaterial({ color: COLORS.purple })
++
+   /** Erzeugt eine echte 5-zackige Sternform (extrudiert). */
+   private static makeStarGeometry(): THREE.ExtrudeGeometry {
+     const shape = new THREE.Shape()
+@@ -77,25 +96,21 @@ export class World {
+   }
+ 
+   private spawnSpike(x: number, z: number) {
+-    const m = new THREE.Mesh(
+-      this.spikeGeo,
+-      new THREE.MeshStandardMaterial({ color: 0x330011, emissive: COLORS.pink, emissiveIntensity: 1.3, metalness: 0.5, roughness: 0.3 }),
+-    )
++    const m = new THREE.Mesh(this.spikeGeo, this.spikeMat)
+     m.position.set(x, 0.8, z)
+     m.rotation.y = Math.PI / 4
+     m.castShadow = true
+     this.scene.add(m)
+-    this.obstacles.push({ mesh: m, type: 'spike', hw: 0.7, hh: 1.6, hd: 0.7 })
++    // hh = HALBE Kegelhöhe (Konvention wie Block/Bar) — volle Höhe wäre eine
++    // unsichtbare Kill-Zone weit über der sichtbaren Spitze.
++    this.obstacles.push({ mesh: m, type: 'spike', hw: 0.7, hh: 0.8, hd: 0.7 })
+   }
+ 
+   private spawnBlock(x: number, z: number) {
+-    const m = new THREE.Mesh(
+-      this.blockGeo,
+-      new THREE.MeshStandardMaterial({ color: 0x1a0a33, emissive: COLORS.purple, emissiveIntensity: 0.9, metalness: 0.6, roughness: 0.25 }),
+-    )
++    const m = new THREE.Mesh(this.blockGeo, this.blockMat)
+     m.position.set(x, 1.2, z)
+     m.castShadow = true
+-    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(this.blockGeo), new THREE.LineBasicMaterial({ color: COLORS.purple }))
++    const edges = new THREE.LineSegments(this.blockEdgesGeo, this.blockEdgesMat)
+     m.add(edges)
+     this.scene.add(m)
+     this.obstacles.push({ mesh: m, type: 'block', hw: 1.1, hh: 1.2, hd: 1.1 })
+@@ -103,10 +118,7 @@ export class World {
+ 
+   /** Niedrige Barriere über die volle Breite -> muss übersprungen werden. */
+   private spawnBar(z: number) {
+-    const m = new THREE.Mesh(
+-      this.barGeo,
+-      new THREE.MeshStandardMaterial({ color: 0x331a00, emissive: COLORS.yellow, emissiveIntensity: 1.1, metalness: 0.5, roughness: 0.3 }),
+-    )
++    const m = new THREE.Mesh(this.barGeo, this.barMat)
+     m.position.set(0, 0.5, z)
+     m.castShadow = true
+     this.scene.add(m)
+@@ -115,16 +127,13 @@ export class World {
+ 
+   private spawnCrystal(x: number, z: number, kind: CrystalKind = 'normal') {
+     let geo: THREE.BufferGeometry = this.crystalGeo
+-    let mat: THREE.MeshStandardMaterial
++    let mat: THREE.MeshStandardMaterial = this.crystalMat
+     if (kind === 'ultra') {
+       geo = this.ultraGeo
+-      mat = new THREE.MeshStandardMaterial({ color: 0x4a3000, emissive: COLORS.gold, emissiveIntensity: 1.8, metalness: 0.6, roughness: 0.15 })
++      mat = this.ultraMat
+     } else if (kind === 'star') {
+       geo = this.starGeo
+-      // strahlend gelb-weiß, klar unterscheidbar vom goldenen Ultra-Bonus
+-      mat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xfff4b0, emissiveIntensity: 2.2, metalness: 0.4, roughness: 0.1 })
+-    } else {
+-      mat = new THREE.MeshStandardMaterial({ color: 0x004433, emissive: COLORS.green, emissiveIntensity: 1.6, metalness: 0.3, roughness: 0.2 })
++      mat = this.starMat
+     }
+     const m = new THREE.Mesh(geo, mat)
+     m.position.set(x, 1.4, z)
+@@ -137,9 +146,13 @@ export class World {
+   private static readonly BLOCK_SLOTS = [-5.5, -3.5, -1.5, 1.5, 3.5, 5.5]
+   private static readonly LANES = [-6, -3, 0, 3, 6]
+ 
+-  /** Erzeugt das nächste Hindernis-Segment. `speed` steuert die Schwierigkeit. */
+-  generateChunk(speed: number) {
+-    const diff = (speed - BASE_SPEED) / (MAX_SPEED - BASE_SPEED) // 0..1
++  /**
++   * Erzeugt das nächste Hindernis-Segment. Die Schwierigkeit steigt mit der
++   * Strecke — deterministisch aus nextSpawnZ, damit gleiches Seed auf JEDEM
++   * Client exakt dieselbe Hindernisfolge ergibt.
++   */
++  generateChunk() {
++    const diff = Math.max(0, Math.min(1, -this.nextSpawnZ / DIFF_RAMP_DISTANCE)) // 0..1
+     const z = this.nextSpawnZ
+     const r = this.rng.next()
+ 
+@@ -186,8 +199,8 @@ export class World {
+   }
+ 
+   /** Spawnt so lange voraus, bis genug Strecke vor dem Spieler liegt. */
+-  fillAhead(playerZ: number, spawnAhead: number, speed: number) {
+-    while (this.nextSpawnZ > playerZ - spawnAhead) this.generateChunk(speed)
++  fillAhead(playerZ: number, spawnAhead: number) {
++    while (this.nextSpawnZ > playerZ - spawnAhead) this.generateChunk()
+   }
+ 
+   removeObstacle(i: number) {
+diff --git a/src/hooks/useEngine.ts b/src/hooks/useEngine.ts
+index e1204c2..7dc2a61 100644
+--- a/src/hooks/useEngine.ts
++++ b/src/hooks/useEngine.ts
+@@ -18,6 +18,24 @@ import { fetchDailyGhost } from '../firebase/ghosts'
+ 
+ const BEST_KEY = 'geometryUltraBest'
+ 
++// localStorage kann komplett fehlen/werfen (Safari "Alle Cookies blockieren",
++// manche In-App-WebViews). Das darf weder den ersten Render noch die
++// Render-Loop (onGameOver) töten -> defensiv kapseln.
++function readBest(): number {
++  try {
++    return parseInt(localStorage.getItem(BEST_KEY) || '0', 10)
++  } catch {
++    return 0
++  }
++}
++function writeBest(score: number) {
++  try {
++    localStorage.setItem(BEST_KEY, String(score))
++  } catch {
++    // kein Storage verfügbar — Bestwert lebt dann nur im State
++  }
++}
++
+ export type UiState = 'menu' | 'playing' | 'gameover'
+ 
+ export function useEngine() {
+@@ -31,7 +49,7 @@ export function useEngine() {
+   const [speedPct, setSpeedPct] = useState(0)
+   const [turboPct, setTurboPct] = useState(0)
+   const [invincibleSec, setInvincibleSec] = useState(0)
+-  const [best, setBest] = useState(() => parseInt(localStorage.getItem(BEST_KEY) || '0', 10))
++  const [best, setBest] = useState(readBest)
+   const [isNewBest, setIsNewBest] = useState(false)
+   const [result, setResult] = useState<RunResult | null>(null)
+   const [lastGhost, setLastGhost] = useState<GhostData | null>(null)
+@@ -78,9 +96,9 @@ export function useEngine() {
+         setInvincibleSec(inv)
+       },
+       onGameOver: (r) => {
+-        const prevBest = parseInt(localStorage.getItem(BEST_KEY) || '0', 10)
++        const prevBest = readBest()
+         const newBest = r.score > prevBest
+-        if (newBest) localStorage.setItem(BEST_KEY, String(r.score))
++        if (newBest) writeBest(r.score)
+         setBest(Math.max(prevBest, r.score))
+         setIsNewBest(newBest)
+         setResult(r)
+@@ -133,6 +151,11 @@ export function useEngine() {
+     engineRef.current?.setCollisionMode(on)
+   }, [])
+ 
++  /** Server-Zeit-Offset für die Mitspieler-Extrapolation (Multiplayer). */
++  const setServerOffset = useCallback((offset: number) => {
++    engineRef.current?.setServerOffset(offset)
++  }, [])
++
+   return {
+     containerRef,
+     uiState,
+@@ -153,5 +176,6 @@ export function useEngine() {
+     updateRemote,
+     setSpectating,
+     setCollisionMode,
++    setServerOffset,
+   }
+ }
+diff --git a/src/hooks/useMultiplayer.ts b/src/hooks/useMultiplayer.ts
+index b376503..76a0830 100644
+--- a/src/hooks/useMultiplayer.ts
++++ b/src/hooks/useMultiplayer.ts
+@@ -10,6 +10,7 @@ import type { User } from 'firebase/auth'
+ import { useCallback, useEffect, useState } from 'react'
+ import type { ProgressState } from '../game/types'
+ import {
++  claimHost,
+   createRoom,
+   finishRace as mpFinishRace,
+   pushProgress as mpPushProgress,
+@@ -38,6 +39,18 @@ export function useMultiplayer(user: User | null) {
+     return unsub
+   }, [code])
+ 
++  // Host-Ausfall: Ist der eingetragene Host nicht mehr im Raum, übernimmt der
++  // (stabil) erste verbleibende Spieler — sonst könnte nie wieder jemand
++  // starten oder eine Revanche auslösen.
++  useEffect(() => {
++    if (!room || !user || !code) return
++    const ids = Object.keys(room.players ?? {}).sort()
++    if (!ids.includes(user.uid)) return
++    if (room.players[room.meta.host]) return // Host ist noch da
++    if (ids[0] !== user.uid) return // nur einer übernimmt
++    void claimHost(code, user.uid)
++  }, [room, user, code])
++
+   const create = useCallback(async () => {
+     if (!user) return
+     setBusy(true)
+@@ -62,13 +75,15 @@ export function useMultiplayer(user: User | null) {
+       setBusy(true)
+       setError(null)
+       try {
+-        const ok = await joinRoom(c, user)
+-        if (!ok) {
+-          setError('Raum nicht gefunden')
++        const res = await joinRoom(c, user)
++        if (res !== 'ok') {
++          setError(res === 'running' ? 'Das Rennen läuft bereits — warte auf die nächste Runde' : res === 'expired' ? 'Dieser Raum ist abgelaufen' : 'Raum nicht gefunden')
+           return
+         }
+-        setOffset(await getServerOffset())
++        // Code sofort setzen, damit ein "Zurück" während des Offset-Wartens
++        // den Raum sauber wieder verlassen kann (kein Zombie-Spieler).
+         setCode(c)
++        setOffset(await getServerOffset())
+       } catch (e) {
+         console.error(e)
+         setError('Beitritt fehlgeschlagen')
+@@ -93,8 +108,9 @@ export function useMultiplayer(user: User | null) {
+   }, [code, user, room])
+ 
+   const start = useCallback(async () => {
+-    if (code) await startCountdown(code)
+-  }, [code])
++    // nur aus der Lobby heraus starten (Doppelklick/Spätklick abfangen)
++    if (code && room?.meta.state === 'lobby') await startCountdown(code)
++  }, [code, room])
+ 
+   const toggleCollision = useCallback(async () => {
+     if (code && room) await setCollision(code, !room.meta.collision)
+@@ -115,9 +131,12 @@ export function useMultiplayer(user: User | null) {
+   )
+ 
+   const rematch = useCallback(async () => {
+-    if (code) {
++    if (!code) return
++    try {
+       await resetRoom(code)
+       setOffset(await getServerOffset())
++    } catch (e) {
++      console.error('Revanche fehlgeschlagen:', e)
+     }
+   }, [code])
+ 
+diff --git a/src/main.tsx b/src/main.tsx
+index 2c89a51..648b831 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -1,10 +1,45 @@
+-import { StrictMode } from 'react'
++import { Component, StrictMode, type ReactNode } from 'react'
+ import { createRoot } from 'react-dom/client'
+ import App from './App.tsx'
+ import './styles/index.css'
+ 
++// Ohne ErrorBoundary unmountet React 18 bei JEDEM nicht abgefangenen Fehler
++// (auch aus Effects) den kompletten Baum -> dauerhaft weißer Screen. Mit
++// Boundary gibt es stattdessen eine Meldung und einen Neu-laden-Button.
++class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
++  state = { error: null as Error | null }
++
++  static getDerivedStateFromError(error: Error) {
++    return { error }
++  }
++
++  componentDidCatch(error: Error) {
++    console.error('Unbehandelter Fehler:', error)
++  }
++
++  render() {
++    if (this.state.error) {
++      return (
++        <div style={{ color: '#fff', fontFamily: 'system-ui', padding: 40, textAlign: 'center' }}>
++          <h2>💥 Etwas ist schiefgelaufen</h2>
++          <p style={{ opacity: 0.7 }}>{this.state.error.message}</p>
++          <button
++            style={{ padding: '10px 24px', fontSize: 16, cursor: 'pointer', borderRadius: 8, border: 'none', background: '#00f0ff', color: '#000' }}
++            onClick={() => window.location.reload()}
++          >
++            Neu laden
++          </button>
++        </div>
++      )
++    }
++    return this.props.children
++  }
++}
++
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+-    <App />
++    <ErrorBoundary>
++      <App />
++    </ErrorBoundary>
+   </StrictMode>,
+ )
+diff --git a/src/styles/index.css b/src/styles/index.css
+index 6776001..5555748 100644
+--- a/src/styles/index.css
++++ b/src/styles/index.css
+@@ -26,6 +26,14 @@ body,
+   color: #fff;
+   user-select: none;
+   -webkit-tap-highlight-color: transparent;
++  /* Doppeltipp ist Spielmechanik (Doppelsprung) — Doppeltipp-Zoom und
++     Pull-to-Refresh des Browsers unterbinden */
++  touch-action: manipulation;
++  overscroll-behavior: none;
++}
++
++.canvas-host canvas {
++  touch-action: none;
+ }
+ 
+ .app {
+diff --git a/src/ui/multiplayer/Lobby.tsx b/src/ui/multiplayer/Lobby.tsx
+index 595bb40..22e1047 100644
+--- a/src/ui/multiplayer/Lobby.tsx
++++ b/src/ui/multiplayer/Lobby.tsx
+@@ -82,7 +82,9 @@ export function Lobby(props: LobbyProps) {
+           </div>
+           {error && <div className="mp-error">{error}</div>}
+         </div>
+-        <button className="btn secondary" onClick={onBack}>
++        {/* Während eines laufenden Beitritts gesperrt — sonst bleibt der halb
++            beigetretene Spieler als Karteileiche im Raum zurück. */}
++        <button className="btn secondary" disabled={busy} onClick={onBack}>
+           Zurück
+         </button>
+       </div>
+diff --git a/src/ui/multiplayer/MpRanking.tsx b/src/ui/multiplayer/MpRanking.tsx
+index c2baf3c..ab26e6f 100644
+--- a/src/ui/multiplayer/MpRanking.tsx
++++ b/src/ui/multiplayer/MpRanking.tsx
+@@ -1,18 +1,30 @@
+ // MpRanking — kompakte Live-Rangliste, die während des gesamten Multiplayer-
+ // Rennens oben eingeblendet wird. Liest direkt aus dem Raum-Zustand und
+ // aktualisiert sich mit jedem Netzwerk-Update.
++//
++// Der eigene Score ist lokal quasi-frisch, der der Gegner aber 100-300 ms alt —
++// ohne Korrektur zeigt deshalb JEDER Client sich selbst vorne. Daher wird der
++// Gegner-Score per Dead Reckoning (score + vz * Alter) hochgerechnet.
+ 
+ import type { RoomState } from '../../firebase/multiplayer'
+ 
+ interface Props {
+   room: RoomState | null
+   uid: string | null
++  /** Server-Zeit-Offset (Server-Zeit ≈ Date.now() + offset). */
++  offset: number
+ }
+ 
+-const effScore = (p: { finished?: boolean; finalScore?: number; score?: number }) => (p.finished ? (p.finalScore ?? 0) : (p.score ?? 0))
+-
+-export function MpRanking({ room, uid }: Props) {
++export function MpRanking({ room, uid, offset }: Props) {
+   if (!room) return null
++  const now = Date.now() + offset
++  const effScore = (p: { finished?: boolean; finalScore?: number; score?: number; t?: number; vz?: number }) => {
++    if (p.finished) return p.finalScore ?? 0
++    const base = p.score ?? 0
++    if (typeof p.t !== 'number' || !p.vz) return base
++    const age = Math.max(0, Math.min(0.5, (now - p.t) / 1000))
++    return Math.floor(base + p.vz * age)
++  }
+   const players = Object.values(room.players ?? {}).sort((a, b) => effScore(b) - effScore(a))
+   if (players.length === 0) return null
+ 
+diff --git a/src/ui/multiplayer/MultiplayerResults.tsx b/src/ui/multiplayer/MultiplayerResults.tsx
+index 4f26602..e142816 100644
+--- a/src/ui/multiplayer/MultiplayerResults.tsx
++++ b/src/ui/multiplayer/MultiplayerResults.tsx
+@@ -2,21 +2,25 @@
+ //  - Solange noch jemand fährt: kompaktes Zuschauer-Overlay (lässt die 3D-Szene
+ //    sichtbar, denn die Kamera folgt dem führenden Mitspieler).
+ //  - Sobald alle durch sind: voller Endstand mit Rangliste.
++// Spieler, die seit längerem nichts mehr senden (Tab zu/Verbindung weg), werden
++// wie ausgeschieden behandelt — sonst würde der Endstand nie erscheinen.
+ 
+ import type { User } from 'firebase/auth'
+-import type { RoomState } from '../../firebase/multiplayer'
++import { isStale, type RoomState } from '../../firebase/multiplayer'
+ import { Avatar } from '../Avatar'
+ 
+ interface Props {
+   room: RoomState | null
+   user: User | null
++  /** Server-Zeit-Offset (Server-Zeit ≈ Date.now() + offset). */
++  offset: number
+   onRematch: () => void
+   onLeave: () => void
+ }
+ 
+ const effScore = (p: { finished?: boolean; finalScore?: number; score?: number }) => (p.finished ? (p.finalScore ?? 0) : (p.score ?? 0))
+ 
+-export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
++export function MultiplayerResults({ room, user, offset, onRematch, onLeave }: Props) {
+   if (!room) {
+     return (
+       <div className="overlay">
+@@ -28,14 +32,16 @@ export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
+     )
+   }
+ 
++  const now = Date.now() + offset
++  const done = (p: Parameters<typeof isStale>[0]) => p.finished || isStale(p, now)
+   const players = Object.values(room.players ?? {}).sort((a, b) => effScore(b) - effScore(a))
+-  const allFinished = players.length > 0 && players.every((p) => p.finished)
++  const allFinished = players.length > 0 && players.every(done)
+   const isHost = room.meta.host === user?.uid
+   const medals = ['🥇', '🥈', '🥉']
+ 
+   // ----- Zuschauer-Modus (noch fährt jemand) -----
+   if (!allFinished) {
+-    const leader = players.find((p) => !p.finished)
++    const leader = players.find((p) => !done(p))
+     return (
+       <div className="spectate-overlay">
+         <div className="spectate-card">
+@@ -46,7 +52,7 @@ export function MultiplayerResults({ room, user, onRematch, onLeave }: Props) {
+               <li key={p.uid} className={`lb-row${p.uid === user?.uid ? ' me' : ''}`}>
+                 <span className="lb-rank">{i + 1}</span>
+                 <span className="lb-name">
+-                  {p.name} {p.finished ? '💥' : '🏃'}
++                  {p.name} {p.finished ? '💥' : isStale(p, now) ? '📴' : '🏃'}
+                 </span>
+                 <span className="lb-score">{effScore(p)}</span>
+               </li>

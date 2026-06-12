@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { saveDailyGhost } from './firebase/ghosts'
+import { currentServerOffset, isStale, serverNow } from './firebase/multiplayer'
 import { submitDailyScore, submitScore } from './firebase/scores'
 import { useAuth } from './hooks/useAuth'
 import { useEngine } from './hooks/useEngine'
@@ -25,15 +26,38 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
   const [mpActive, setMpActive] = useState(false)
 
-  const { beginRun, setProgressHandler, updateRemote, setSpectating, setCollisionMode } = eng
+  const { beginRun, setProgressHandler, updateRemote, setSpectating, setCollisionMode, setServerOffset } = eng
   const phase = mp.room?.meta.state
   const startAt = mp.room?.meta.startAt
   const seed = mp.room?.meta.seed
   const startedRef = useRef(false)
   const finishedRef = useRef(false)
 
+  // Aktuelle Werte für den Start-Timer — bewusst über Refs, damit der
+  // Countdown-Effect NICHT von mp.room abhängen muss (jedes RTDB-Update erzeugt
+  // ein neues Raum-Objekt; als Dependency würde das Cleanup den armierten
+  // Start-Timer abräumen und der Client würde nie starten).
+  const roomRef = useRef(mp.room)
+  roomRef.current = mp.room
+  const userRef = useRef(user)
+  userRef.current = user
+
+  // Spieler, die mitten im Lauf seit längerem nichts mehr senden (Tab zu,
+  // Verbindung weg ohne onDisconnect), blockieren weder den Endstand noch
+  // bleiben ihre Cubes als Geister stehen. serverNow() liest den LIVE-Offset.
+  const nowServer = mp.room ? serverNow() : 0
   const mpPlayers = mp.room ? Object.values(mp.room.players ?? {}) : []
-  const allFinished = mpPlayers.length > 0 && mpPlayers.every((p) => p.finished)
+  const allFinished = mpPlayers.length > 0 && mpPlayers.every((p) => p.finished || isStale(p, nowServer, startAt))
+
+  // Stale-Erkennung braucht eine tickende Uhr: Wenn der letzte aktive Spieler
+  // einfach verschwindet (Tab zu), kommen keine Raum-Updates mehr — ohne Tick
+  // würde der Zuschauer-Screen nie zum Endstand wechseln.
+  const [, setStaleTick] = useState(0)
+  useEffect(() => {
+    if (!(mpActive && eng.uiState === 'gameover' && !allFinished)) return
+    const id = setInterval(() => setStaleTick((k) => k + 1), 1000)
+    return () => clearInterval(id)
+  }, [mpActive, eng.uiState, allFinished])
 
   // --- Solo: Score (und im Daily der Geist) nach dem Crash hochladen ---
   useEffect(() => {
@@ -51,8 +75,11 @@ export default function App() {
     setSaveStatus('Score wird gespeichert…')
 
     if (mode === 'daily') {
-      Promise.all([submitDailyScore(user, score, runSeed), ghost ? saveDailyGhost(user, ghost) : Promise.resolve(false)])
-        .then(([saved]) => {
+      // Score-Status hängt NUR am Score-Upload; der Geist wird unabhängig
+      // gespeichert (sein Scheitern ist kein Nutzerfehler, z.B. wenn fast
+      // gleichzeitig jemand einen besseren Lauf hochlädt).
+      submitDailyScore(user, score, runSeed)
+        .then((saved) => {
           setSaveStatus(saved ? '✓ Tages-Score gespeichert' : 'Kein neuer Tagesrekord')
           setLbRefresh((k) => k + 1)
         })
@@ -60,6 +87,9 @@ export default function App() {
           console.error('Daily-Upload fehlgeschlagen:', err)
           setSaveStatus('Speichern fehlgeschlagen')
         })
+      if (ghost) {
+        saveDailyGhost(user, ghost).catch((err) => console.warn('Geist konnte nicht gespeichert werden:', err))
+      }
     } else {
       submitScore(user, score, mode, runSeed)
         .then((saved) => {
@@ -79,38 +109,73 @@ export default function App() {
     return () => setProgressHandler(null)
   }, [mpActive, mp.pushProgress, setProgressHandler])
 
+  // --- Multiplayer: Beitritt kann nach einem "Zurück" noch nachträglich
+  // durchgehen (Promise löst spät auf) — dann den Raum sofort wieder verlassen,
+  // statt als Karteileiche die Lobby der anderen zu blockieren.
+  useEffect(() => {
+    if (!mpActive && mp.code) void mp.leave()
+  }, [mpActive, mp.code, mp.leave])
+
   // --- Multiplayer: Mitspieler-Cubes aktualisieren ---
   useEffect(() => {
     if (!mpActive || !mp.room) return
+    // Live-Offset an die Engine durchreichen (Dead-Reckoning-Uhr)
+    setServerOffset(currentServerOffset())
+    const now = serverNow()
+    const raceStartAt = mp.room.meta.startAt
     const others = Object.values(mp.room.players ?? {})
-      .filter((p) => p.uid !== user?.uid)
-      .map((p) => ({ uid: p.uid, x: p.x ?? 0, y: p.y ?? 0.6, z: p.z ?? 0, alive: (p.alive ?? true) && !p.finished }))
+      .filter((p) => p.uid && p.uid !== user?.uid)
+      .map((p) => ({
+        uid: p.uid,
+        x: p.x ?? 0,
+        y: p.y ?? 0.6,
+        z: p.z ?? 0,
+        alive: (p.alive ?? true) && !p.finished && !isStale(p, now, raceStartAt),
+        t: p.t,
+        vz: p.vz,
+      }))
     updateRemote(others)
-  }, [mpActive, mp.room, user, updateRemote])
+  }, [mpActive, mp.room, user, updateRemote, setServerOffset])
 
   // --- Multiplayer: Countdown -> synchron + nebeneinander starten ---
+  // Abhängig nur von Primitiven (phase/startAt/seed): Raum-Updates während des
+  // Countdowns dürfen den Timer nicht abräumen. Raumdaten kommen aus Refs.
   useEffect(() => {
     if (!mpActive) return
     if (phase === 'lobby') {
       startedRef.current = false
       return
     }
-    if (phase === 'countdown' && startAt && seed !== undefined && !startedRef.current) {
+    if (phase !== 'countdown' || !startAt || seed === undefined) return
+    if (startedRef.current) return
+
+    const fire = () => {
+      if (startedRef.current) return
       startedRef.current = true
       // Startaufstellung nebeneinander: eigener Index in stabil sortierter Liste
-      const ids = mp.room ? Object.keys(mp.room.players ?? {}).sort() : []
-      const myIndex = user ? Math.max(0, ids.indexOf(user.uid)) : 0
+      const room = roomRef.current
+      const me = userRef.current
+      const ids = room ? Object.keys(room.players ?? {}).sort() : []
+      const myIndex = me ? Math.max(0, ids.indexOf(me.uid)) : 0
       const n = ids.length || 1
       const spawnX = (myIndex - (n - 1) / 2) * 2.5
-      const collision = mp.room?.meta.collision ?? false
-      const delay = Math.max(0, startAt - mp.offset - Date.now())
-      const t = setTimeout(() => {
-        setCollisionMode(collision)
-        void beginRun('multiplayer', seed, spawnX)
-      }, delay)
-      return () => clearTimeout(t)
+      setCollisionMode(room?.meta.collision ?? false)
+      void beginRun('multiplayer', seed, spawnX)
     }
-  }, [mpActive, phase, startAt, seed, mp.offset, mp.room, user, beginRun, setCollisionMode])
+
+    const delay = startAt - serverNow()
+    if (delay < -3000) return // Start liegt weit zurück (verwaister Raum) -> nicht blind reinspringen
+    const t = setTimeout(fire, Math.max(0, delay))
+    // Hintergrund-Tabs drosseln setTimeout: beim Sichtbarwerden sofort nachholen
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && startAt - serverNow() <= 0) fire()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearTimeout(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [mpActive, phase, startAt, seed, beginRun, setCollisionMode])
 
   // --- Multiplayer: eigenen Crash an die Lobby melden ---
   useEffect(() => {
@@ -150,7 +215,7 @@ export default function App() {
       )}
 
       {/* Live-Rangliste während des Multiplayer-Rennens */}
-      {mpActive && eng.uiState === 'playing' && <MpRanking room={mp.room} uid={user?.uid ?? null} />}
+      {mpActive && eng.uiState === 'playing' && <MpRanking room={mp.room} uid={user?.uid ?? null} offset={currentServerOffset()} />}
 
       {eng.uiState !== 'menu' && (
         <button className="mute-btn" onClick={eng.toggleMute} aria-label="Ton an/aus">
@@ -196,7 +261,7 @@ export default function App() {
         />
       )}
       {mpActive && eng.uiState === 'gameover' && (
-        <MultiplayerResults room={mp.room} user={user} onRematch={() => void mp.rematch()} onLeave={leaveMultiplayer} />
+        <MultiplayerResults room={mp.room} user={user} offset={currentServerOffset()} onRematch={() => void mp.rematch()} onLeave={leaveMultiplayer} />
       )}
 
       {/* Crash-Flash */}

@@ -49,6 +49,8 @@ export class Engine {
   private mode: GameMode = 'classic'
   private seed = 1
   private speed = BASE_SPEED
+  private lastSentVz = 0
+  private serverOffset = 0 // Server-Zeit ≈ Date.now() + serverOffset
   private score = 0
   private distance = 0
   private elapsed = 0
@@ -96,10 +98,21 @@ export class Engine {
     this.bundle.camera.position.set(0, 6, 12)
     this.bundle.camera.lookAt(0, 1, 0)
     // ein bisschen Deko im Hintergrund
-    for (let i = 0; i < 4; i++) this.world.generateChunk(this.speed)
+    for (let i = 0; i < 4; i++) this.world.generateChunk()
+
+    // iOS/Autoplay: AudioContext darf nur synchron in einer echten Nutzergeste
+    // entsperrt werden. Multiplayer/Daily starten aber aus setTimeout/await heraus
+    // — daher hier bei jeder Geste entsperren (init/resume sind idempotent).
+    window.addEventListener('pointerdown', this.unlockAudio)
+    window.addEventListener('keydown', this.unlockAudio)
 
     window.addEventListener('resize', this.onResize)
     this.rafId = requestAnimationFrame(this.loop)
+  }
+
+  private unlockAudio = () => {
+    this.audio.init()
+    this.audio.resume()
   }
 
   // ----------------------------- Öffentliche API -----------------------------
@@ -116,7 +129,12 @@ export class Engine {
 
   /** Aktualisiert die Positionen der Mitspieler (Multiplayer, von React). */
   updateRemotePlayers(states: RemoteState[]) {
-    this.remotePlayers.setTargets(states)
+    this.remotePlayers.setTargets(states, Date.now() + this.serverOffset)
+  }
+
+  /** Setzt den Server-Zeit-Offset (für die Extrapolation der Mitspieler). */
+  setServerOffset(offset: number) {
+    this.serverOffset = offset
   }
 
   /** Zuschauer-Modus: Kamera folgt dem führenden Mitspieler (nach eigenem Crash). */
@@ -138,6 +156,7 @@ export class Engine {
     this.seed = seed
     this.mode = mode
     this.speed = BASE_SPEED
+    this.lastSentVz = 0
     this.score = 0
     this.distance = 0
     this.elapsed = 0
@@ -169,7 +188,7 @@ export class Engine {
     this.resetFloor()
 
     // Anfangs-Strecke deterministisch vorab erzeugen
-    this.world.fillAhead(0, SPAWN_AHEAD, this.speed)
+    this.world.fillAhead(0, SPAWN_AHEAD)
 
     this.state = 'playing'
     this.reportScore(true)
@@ -178,10 +197,17 @@ export class Engine {
   /** Zurück ins Menü (rotierender Cube). */
   toMenu() {
     this.state = 'menu'
+    this.spectating = false
+    this.camShake = 0
     this.player.setVisible(true)
     this.player.reset()
     this.ghostPlayer.clear()
     this.remotePlayers.clear()
+    // Boden/Welt zurück zum Ursprung — die Menü-Kamera schaut fest auf z≈0;
+    // ohne Reset stünden Boden-Segmente noch an der Z-Position des letzten Laufs.
+    this.resetFloor()
+    this.world.reset(this.seed)
+    for (let i = 0; i < 4; i++) this.world.generateChunk()
   }
 
   setMuted(muted: boolean) {
@@ -192,6 +218,8 @@ export class Engine {
     cancelAnimationFrame(this.rafId)
     if (this.goTimer) clearTimeout(this.goTimer)
     this.input.detach()
+    window.removeEventListener('pointerdown', this.unlockAudio)
+    window.removeEventListener('keydown', this.unlockAudio)
     window.removeEventListener('resize', this.onResize)
     this.bundle.renderer.dispose()
     if (this.canvas.parentElement === this.container) this.container.removeChild(this.canvas)
@@ -229,10 +257,15 @@ export class Engine {
     this.lastT = now
     if (dt > 0.05) dt = 0.05
 
-    if (this.state === 'playing') this.update(dt)
-    this.updateVisualsAlways(dt)
-
-    this.bundle.renderer.render(this.bundle.scene, this.bundle.camera)
+    // Ein einzelner Fehler (z.B. aus einem Callback) darf die rAF-Schleife
+    // nicht dauerhaft töten — sonst friert das ganze Spiel ein.
+    try {
+      if (this.state === 'playing') this.update(dt)
+      this.updateVisualsAlways(dt)
+      this.bundle.renderer.render(this.bundle.scene, this.bundle.camera)
+    } catch (e) {
+      console.error('Engine-Frame fehlgeschlagen:', e)
+    }
     this.rafId = requestAnimationFrame(this.loop)
   }
 
@@ -247,6 +280,7 @@ export class Engine {
     // vorwärts (Welt-Z nimmt ab)
     const dz = curSpeed * dt
     const p = this.player.position
+    const prevZ = p.z // für Swept-Kollision (Tunneling bei hohem Tempo/niedriger FPS)
     p.z -= dz
     this.distance += dz
     this.score += dz
@@ -257,6 +291,7 @@ export class Engine {
 
     // Bewegung (seitlich, Sprung, Rotation)
     const side = this.input.getSideInput()
+    const prevY = p.y // Höhe vor der Bewegung (für Y-Interpolation im Swept-Test)
     const landed = this.player.updateMovement(dt, side, dz)
     if (landed) this.particles.burst(p.x, GROUND_Y - 0.5, p.z, COLORS.purple, 6, 3)
 
@@ -271,7 +306,7 @@ export class Engine {
     this.player.emitTrail()
 
     // Strecke nachfüllen
-    this.world.fillAhead(p.z, SPAWN_AHEAD, this.speed)
+    this.world.fillAhead(p.z, SPAWN_AHEAD)
 
     // Hindernisse: Despawn + Kollision
     for (let i = this.world.obstacles.length - 1; i >= 0; i--) {
@@ -280,7 +315,7 @@ export class Engine {
         this.world.removeObstacle(i)
         continue
       }
-      if (this.hitTest(o.mesh.position, o.hw, o.hh, o.hd)) {
+      if (this.hitTest(o.mesh.position, o.hw, o.hh, o.hd, prevZ, prevY)) {
         if (this.player.isInvincible) {
           // unverwundbar: Hindernis zerschmettern statt sterben
           this.audio.smash()
@@ -293,7 +328,8 @@ export class Engine {
       }
     }
 
-    // Kristalle: Einsammeln + Despawn
+    // Kristalle: Einsammeln + Despawn (z-Abstand zum im Frame durchfahrenen
+    // Intervall [p.z, prevZ], sonst werden Kristalle bei hohem Tempo übersprungen)
     for (let i = this.world.crystals.length - 1; i >= 0; i--) {
       const c = this.world.crystals[i]
       if (c.mesh.position.z > p.z + DESPAWN_BACK) {
@@ -302,7 +338,8 @@ export class Engine {
       }
       const dx = p.x - c.mesh.position.x
       const dy = p.y - c.mesh.position.y
-      const dzc = p.z - c.mesh.position.z
+      const nearestZ = Math.max(p.z, Math.min(prevZ, c.mesh.position.z))
+      const dzc = nearestZ - c.mesh.position.z
       if (dx * dx + dy * dy + dzc * dzc < 1.7 * 1.7) {
         this.collectCrystal(c)
         this.world.removeCrystal(i)
@@ -328,12 +365,17 @@ export class Engine {
     this.audio.beat(dt, this.speed)
     this.reportScore(false)
 
-    // Multiplayer: eigene Position gedrosselt (~12 Hz) nach außen melden
+    // Multiplayer: eigene Position gedrosselt (~12 Hz) nach außen melden.
+    // Bei Tempo-Sprüngen (Boost an/aus) sofort senden, damit die Extrapolation
+    // der anderen Clients nicht mit veraltetem vz weiterrechnet.
     if (this.mode === 'multiplayer') {
       this.progressAcc += dt
-      if (this.progressAcc >= 1 / 12) {
-        this.progressAcc = 0
-        this.callbacks.onProgress?.({ x: p.x, y: p.y, z: p.z, alive: true, score: Math.floor(this.score) })
+      const speedJump = Math.abs(curSpeed - this.lastSentVz) > 4
+      if (this.progressAcc >= 1 / 12 || speedJump) {
+        this.progressAcc -= 1 / 12
+        if (this.progressAcc < 0 || speedJump) this.progressAcc = 0
+        this.lastSentVz = curSpeed
+        this.callbacks.onProgress?.({ x: p.x, y: p.y, z: p.z, alive: true, score: Math.floor(this.score), vz: curSpeed })
       }
     }
   }
@@ -351,7 +393,7 @@ export class Engine {
 
     this.player.updateTrail(dt)
     this.particles.update(dt)
-    this.remotePlayers.update(dt) // Mitspieler flüssig interpolieren
+    this.remotePlayers.update(dt, Date.now() + this.serverOffset) // Mitspieler extrapolieren + glätten
 
     // Kamera-Shake
     if (this.camShake > 0) {
@@ -397,12 +439,30 @@ export class Engine {
 
   // ----------------------------- Helfer -----------------------------
 
-  private hitTest(o: THREE.Vector3, hw: number, hh: number, hd: number): boolean {
+  /**
+   * Kollisionstest mit Swept-Z: geprüft wird das gesamte im Frame durchfahrene
+   * Z-Intervall [p.z, prevZ], nicht nur die Endposition — sonst tunnelt der
+   * Spieler bei hohem Tempo/niedriger Framerate durch schmale Hindernisse.
+   * Die Höhe wird auf den Kreuzungszeitpunkt interpoliert: Wer ein Hindernis in
+   * sicherer Höhe überquert und im SELBEN Frame dahinter landet, darf nicht
+   * rückwirkend mit seiner End-Höhe sterben.
+   */
+  private hitTest(o: THREE.Vector3, hw: number, hh: number, hd: number, prevZ: number, prevY: number): boolean {
     const p = this.player.position
     const phw = 0.5,
       phh = 0.5,
       phd = 0.5 // etwas kleiner als Cube -> fairer
-    return Math.abs(p.x - o.x) < phw + hw && Math.abs(p.y - o.y) < phh + hh && Math.abs(p.z - o.z) < phd + hd
+    if (Math.abs(p.x - o.x) >= phw + hw) return false
+    const zw = phd + hd
+    if (p.z >= o.z + zw || prevZ <= o.z - zw) return false // Frame-Weg verfehlt das Z-Fenster
+
+    // aktuell im Fenster -> aktuelle Höhe zählt
+    if (Math.abs(p.z - o.z) < zw && Math.abs(p.y - o.y) < phh + hh) return true
+    // durchgeflogen -> Höhe zum Kreuzungszeitpunkt (linear interpoliert)
+    const travel = prevZ - p.z
+    const tau = travel > 1e-6 ? Math.min(1, Math.max(0, (prevZ - o.z) / travel)) : 1
+    const yAtCrossing = prevY + (p.y - prevY) * tau
+    return Math.abs(yAtCrossing - o.y) < phh + hh
   }
 
   /** Wendet die Wirkung eines eingesammelten Kristalls an (Score, Turbo, Stern). */
@@ -474,9 +534,8 @@ export class Engine {
    * Hindernisse nachgenerieren + despawnen, Kristalle einsammeln, die er berührt.
    * Funktioniert, weil alle Spieler denselben Seed (= dasselbe Level) haben.
    */
-  private spectateWorld(dt: number, target: THREE.Vector3) {
-    this.speed = Math.min(MAX_SPEED, this.speed + SPEED_RAMP * dt)
-    this.world.fillAhead(target.z, SPAWN_AHEAD, this.speed)
+  private spectateWorld(_dt: number, target: THREE.Vector3) {
+    this.world.fillAhead(target.z, SPAWN_AHEAD)
 
     for (let i = this.world.obstacles.length - 1; i >= 0; i--) {
       if (this.world.obstacles[i].mesh.position.z > target.z + DESPAWN_BACK) this.world.removeObstacle(i)

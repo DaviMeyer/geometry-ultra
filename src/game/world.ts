@@ -2,15 +2,18 @@
 // World — verwaltet Hindernisse, Kristalle und den deterministischen
 // Level-Generator. ALLE gameplay-relevanten Zufälle laufen hier über den
 // Seed-RNG (rng.ts), damit gleiches Seed = gleiches Level ergibt.
+//
+// Wichtig für Multiplayer/Daily: Die Schwierigkeit wird aus der STRECKE
+// (nextSpawnZ) abgeleitet, nicht aus der lokalen Momentangeschwindigkeit —
+// die hängt von Framerate/Turbo des einzelnen Clients ab und würde die Level
+// zwischen Spielern divergieren lassen.
 // ===========================================================================
 
 import * as THREE from 'three'
 import { Rng } from './rng'
 import {
-  BASE_SPEED,
   COLORS,
   type CrystalKind,
-  MAX_SPEED,
   TRACK_WIDTH,
   type ObstacleType,
 } from './types'
@@ -28,6 +31,10 @@ export interface Crystal {
   kind: CrystalKind
 }
 
+/** Nach dieser Strecke (Welteinheiten) ist die Maximal-Schwierigkeit erreicht.
+ *  Entspricht grob der Distanz, nach der die Speed-Rampe früher MAX erreichte. */
+const DIFF_RAMP_DISTANCE = 1600
+
 export class World {
   readonly obstacles: Obstacle[] = []
   readonly crystals: Crystal[] = []
@@ -41,6 +48,18 @@ export class World {
   private crystalGeo = new THREE.OctahedronGeometry(0.6)
   private ultraGeo = new THREE.OctahedronGeometry(0.85)
   private starGeo = World.makeStarGeometry()
+
+  // Geteilte Materialien — Spawns despawnen im Sekundentakt; individuelle
+  // Materialien ohne dispose() wären ein stetig wachsendes GPU-Leak.
+  private spikeMat = new THREE.MeshStandardMaterial({ color: 0x330011, emissive: COLORS.pink, emissiveIntensity: 1.3, metalness: 0.5, roughness: 0.3 })
+  private blockMat = new THREE.MeshStandardMaterial({ color: 0x1a0a33, emissive: COLORS.purple, emissiveIntensity: 0.9, metalness: 0.6, roughness: 0.25 })
+  private barMat = new THREE.MeshStandardMaterial({ color: 0x331a00, emissive: COLORS.yellow, emissiveIntensity: 1.1, metalness: 0.5, roughness: 0.3 })
+  private crystalMat = new THREE.MeshStandardMaterial({ color: 0x004433, emissive: COLORS.green, emissiveIntensity: 1.6, metalness: 0.3, roughness: 0.2 })
+  private ultraMat = new THREE.MeshStandardMaterial({ color: 0x4a3000, emissive: COLORS.gold, emissiveIntensity: 1.8, metalness: 0.6, roughness: 0.15 })
+  // strahlend gelb-weiß, klar unterscheidbar vom goldenen Ultra-Bonus
+  private starMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xfff4b0, emissiveIntensity: 2.2, metalness: 0.4, roughness: 0.1 })
+  private blockEdgesGeo = new THREE.EdgesGeometry(this.blockGeo)
+  private blockEdgesMat = new THREE.LineBasicMaterial({ color: COLORS.purple })
 
   /** Erzeugt eine echte 5-zackige Sternform (extrudiert). */
   private static makeStarGeometry(): THREE.ExtrudeGeometry {
@@ -77,25 +96,21 @@ export class World {
   }
 
   private spawnSpike(x: number, z: number) {
-    const m = new THREE.Mesh(
-      this.spikeGeo,
-      new THREE.MeshStandardMaterial({ color: 0x330011, emissive: COLORS.pink, emissiveIntensity: 1.3, metalness: 0.5, roughness: 0.3 }),
-    )
+    const m = new THREE.Mesh(this.spikeGeo, this.spikeMat)
     m.position.set(x, 0.8, z)
     m.rotation.y = Math.PI / 4
     m.castShadow = true
     this.scene.add(m)
-    this.obstacles.push({ mesh: m, type: 'spike', hw: 0.7, hh: 1.6, hd: 0.7 })
+    // hh = HALBE Kegelhöhe (Konvention wie Block/Bar) — volle Höhe wäre eine
+    // unsichtbare Kill-Zone weit über der sichtbaren Spitze.
+    this.obstacles.push({ mesh: m, type: 'spike', hw: 0.7, hh: 0.8, hd: 0.7 })
   }
 
   private spawnBlock(x: number, z: number) {
-    const m = new THREE.Mesh(
-      this.blockGeo,
-      new THREE.MeshStandardMaterial({ color: 0x1a0a33, emissive: COLORS.purple, emissiveIntensity: 0.9, metalness: 0.6, roughness: 0.25 }),
-    )
+    const m = new THREE.Mesh(this.blockGeo, this.blockMat)
     m.position.set(x, 1.2, z)
     m.castShadow = true
-    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(this.blockGeo), new THREE.LineBasicMaterial({ color: COLORS.purple }))
+    const edges = new THREE.LineSegments(this.blockEdgesGeo, this.blockEdgesMat)
     m.add(edges)
     this.scene.add(m)
     this.obstacles.push({ mesh: m, type: 'block', hw: 1.1, hh: 1.2, hd: 1.1 })
@@ -103,10 +118,7 @@ export class World {
 
   /** Niedrige Barriere über die volle Breite -> muss übersprungen werden. */
   private spawnBar(z: number) {
-    const m = new THREE.Mesh(
-      this.barGeo,
-      new THREE.MeshStandardMaterial({ color: 0x331a00, emissive: COLORS.yellow, emissiveIntensity: 1.1, metalness: 0.5, roughness: 0.3 }),
-    )
+    const m = new THREE.Mesh(this.barGeo, this.barMat)
     m.position.set(0, 0.5, z)
     m.castShadow = true
     this.scene.add(m)
@@ -115,16 +127,13 @@ export class World {
 
   private spawnCrystal(x: number, z: number, kind: CrystalKind = 'normal') {
     let geo: THREE.BufferGeometry = this.crystalGeo
-    let mat: THREE.MeshStandardMaterial
+    let mat: THREE.MeshStandardMaterial = this.crystalMat
     if (kind === 'ultra') {
       geo = this.ultraGeo
-      mat = new THREE.MeshStandardMaterial({ color: 0x4a3000, emissive: COLORS.gold, emissiveIntensity: 1.8, metalness: 0.6, roughness: 0.15 })
+      mat = this.ultraMat
     } else if (kind === 'star') {
       geo = this.starGeo
-      // strahlend gelb-weiß, klar unterscheidbar vom goldenen Ultra-Bonus
-      mat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xfff4b0, emissiveIntensity: 2.2, metalness: 0.4, roughness: 0.1 })
-    } else {
-      mat = new THREE.MeshStandardMaterial({ color: 0x004433, emissive: COLORS.green, emissiveIntensity: 1.6, metalness: 0.3, roughness: 0.2 })
+      mat = this.starMat
     }
     const m = new THREE.Mesh(geo, mat)
     m.position.set(x, 1.4, z)
@@ -137,9 +146,13 @@ export class World {
   private static readonly BLOCK_SLOTS = [-5.5, -3.5, -1.5, 1.5, 3.5, 5.5]
   private static readonly LANES = [-6, -3, 0, 3, 6]
 
-  /** Erzeugt das nächste Hindernis-Segment. `speed` steuert die Schwierigkeit. */
-  generateChunk(speed: number) {
-    const diff = (speed - BASE_SPEED) / (MAX_SPEED - BASE_SPEED) // 0..1
+  /**
+   * Erzeugt das nächste Hindernis-Segment. Die Schwierigkeit steigt mit der
+   * Strecke — deterministisch aus nextSpawnZ, damit gleiches Seed auf JEDEM
+   * Client exakt dieselbe Hindernisfolge ergibt.
+   */
+  generateChunk() {
+    const diff = Math.max(0, Math.min(1, -this.nextSpawnZ / DIFF_RAMP_DISTANCE)) // 0..1
     const z = this.nextSpawnZ
     const r = this.rng.next()
 
@@ -186,8 +199,8 @@ export class World {
   }
 
   /** Spawnt so lange voraus, bis genug Strecke vor dem Spieler liegt. */
-  fillAhead(playerZ: number, spawnAhead: number, speed: number) {
-    while (this.nextSpawnZ > playerZ - spawnAhead) this.generateChunk(speed)
+  fillAhead(playerZ: number, spawnAhead: number) {
+    while (this.nextSpawnZ > playerZ - spawnAhead) this.generateChunk()
   }
 
   removeObstacle(i: number) {

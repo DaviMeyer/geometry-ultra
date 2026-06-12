@@ -52,11 +52,15 @@ export class Rng {
   }
 }
 
-/** Leitet aus dem heutigen Datum (lokal) einen stabilen Tages-Seed ab: YYYYMMDD. */
+/**
+ * Leitet aus dem heutigen UTC-Datum einen stabilen Tages-Seed ab: YYYYMMDD.
+ * UTC statt lokaler Zeit, damit weltweit alle Spieler denselben Tages-Seed
+ * (gleiches Level, gleiche Bestenliste, gleicher Geist) bekommen.
+ */
 export function dailySeed(date = new Date()): number {
-  const y = date.getFullYear()
-  const m = date.getMonth() + 1
-  const d = date.getDate()
+  const y = date.getUTCFullYear()
+  const m = date.getUTCMonth() + 1
+  const d = date.getUTCDate()
   return y * 10000 + m * 100 + d
 }
 

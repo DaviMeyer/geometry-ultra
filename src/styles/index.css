@@ -26,6 +26,14 @@ body,
   color: #fff;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
+  /* Doppeltipp ist Spielmechanik (Doppelsprung) — Doppeltipp-Zoom und
+     Pull-to-Refresh des Browsers unterbinden */
+  touch-action: manipulation;
+  overscroll-behavior: none;
+}
+
+.canvas-host canvas {
+  touch-action: none;
 }
 
 .app {

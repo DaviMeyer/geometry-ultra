@@ -11,6 +11,12 @@ export interface InputCallbacks {
   onMute: () => void
 }
 
+/** Events aus Eingabefeldern (z.B. Raumcode-Input) gehören nicht dem Spiel. */
+function isEditableTarget(e: Event): boolean {
+  const t = e.target as HTMLElement | null
+  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+}
+
 export class InputManager {
   private keys: Record<string, boolean> = {}
   private touchTargetDir = 0
@@ -22,20 +28,29 @@ export class InputManager {
 
   attach(canvas: HTMLElement) {
     this.canvas = canvas
+    // Browser-Gesten (Scroll/Pan/Doppeltipp-Zoom) auf dem Spielfeld unterbinden,
+    // sonst beendet der Browser Wischgesten mit pointercancel.
+    canvas.style.touchAction = 'none'
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('keyup', this.onKeyUp)
+    window.addEventListener('blur', this.onWindowBlur)
     canvas.addEventListener('pointerdown', this.onPointerDown)
     canvas.addEventListener('pointermove', this.onPointerMove)
     canvas.addEventListener('pointerup', this.onPointerUp)
+    canvas.addEventListener('pointercancel', this.onPointerCancel)
+    canvas.addEventListener('lostpointercapture', this.onPointerCancel)
   }
 
   detach() {
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
+    window.removeEventListener('blur', this.onWindowBlur)
     if (this.canvas) {
       this.canvas.removeEventListener('pointerdown', this.onPointerDown)
       this.canvas.removeEventListener('pointermove', this.onPointerMove)
       this.canvas.removeEventListener('pointerup', this.onPointerUp)
+      this.canvas.removeEventListener('pointercancel', this.onPointerCancel)
+      this.canvas.removeEventListener('lostpointercapture', this.onPointerCancel)
     }
   }
 
@@ -61,7 +76,7 @@ export class InputManager {
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
-    if (e.repeat) return
+    if (e.repeat || isEditableTarget(e)) return
     const k = e.key.toLowerCase()
     this.keys[k] = true
     if (k === ' ' || k === 'arrowup' || k === 'w') {
@@ -73,12 +88,27 @@ export class InputManager {
   }
 
   private onKeyUp = (e: KeyboardEvent) => {
+    if (isEditableTarget(e)) return
     this.keys[e.key.toLowerCase()] = false
+  }
+
+  private onWindowBlur = () => {
+    // Fokusverlust (Alt-Tab, Overlay): gedrückte Tasten/Gesten nicht hängen lassen
+    this.keys = {}
+    this.touchTargetDir = 0
+    this.touchStartX = null
   }
 
   private onPointerDown = (e: PointerEvent) => {
     this.touchStartX = e.clientX
     this.touchMoved = false
+    this.touchTargetDir = 0
+    // move/up auch außerhalb des Canvas weiterbekommen (Maus zieht raus etc.)
+    try {
+      ;(e.target as Element | null)?.setPointerCapture?.(e.pointerId)
+    } catch {
+      // ältere Browser ohne Pointer Capture — unkritisch
+    }
   }
 
   private onPointerMove = (e: PointerEvent) => {
@@ -91,8 +121,16 @@ export class InputManager {
   }
 
   private onPointerUp = () => {
-    if (!this.touchMoved) this.cb.onJump() // Tap = Sprung
+    if (this.touchStartX !== null && !this.touchMoved) this.cb.onJump() // Tap = Sprung
     this.touchStartX = null
     this.touchTargetDir = 0
+  }
+
+  private onPointerCancel = () => {
+    // Geste vom Browser/System abgebrochen: KEIN Sprung, Richtung loslassen —
+    // sonst driftet der Cube dauerhaft zur Seite.
+    this.touchStartX = null
+    this.touchTargetDir = 0
+    this.touchMoved = false
   }
 }

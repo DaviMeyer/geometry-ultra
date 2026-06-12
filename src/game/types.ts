@@ -24,6 +24,8 @@ export interface ProgressState {
   z: number
   alive: boolean
   score: number
+  /** Aktuelle Vorwärtsgeschwindigkeit (units/s) — für Dead Reckoning der Empfänger. */
+  vz: number
 }
 
 /** Callbacks, über die die Engine mit React kommuniziert (ohne React zu kennen). */
