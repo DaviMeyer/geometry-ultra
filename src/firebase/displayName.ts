@@ -10,6 +10,7 @@
 import type { User } from 'firebase/auth'
 
 const NICK_KEY = 'geometryUltraNickname'
+const PROMPTED_KEY = 'geometryUltraNickPrompted'
 
 /** Maximale Länge laut Firestore-Rules (RTDB erlaubt 80, bindend ist 64). */
 export const NAME_MAX = 64
@@ -43,4 +44,22 @@ export function setNickname(raw: string): void {
 /** Der Name, unter dem der Spieler überall auftaucht: Nickname > Google > Fallback. */
 export function getPlayerName(user: User | null, fallback = 'Anonym'): string {
   return getNickname() ?? truncateName((user?.displayName ?? '').trim() || fallback)
+}
+
+/** True, wenn dem Nutzer der Nickname-Dialog schon einmal angeboten wurde. */
+export function hasPromptedNickname(): boolean {
+  try {
+    return localStorage.getItem(PROMPTED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** Merkt sich, dass der Erst-Login-Dialog gezeigt wurde (damit er nur einmal kommt). */
+export function markNicknamePrompted(): void {
+  try {
+    localStorage.setItem(PROMPTED_KEY, '1')
+  } catch {
+    // kein Storage — Dialog kann dann erneut erscheinen, harmlos
+  }
 }
