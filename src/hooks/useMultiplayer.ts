@@ -169,7 +169,12 @@ export function useMultiplayer(user: User | null) {
 
   const start = useCallback(async () => {
     // nur aus der Lobby heraus starten (Doppelklick/Spätklick abfangen)
-    if (code && room?.meta.state === 'lobby') await startCountdown(code)
+    if (!code || room?.meta.state !== 'lobby') return
+    // Nicht allein starten: mindestens zwei lebende Spieler nötig.
+    const now = serverNow()
+    const live = Object.values(room.players ?? {}).filter((p) => !isStale(p, now))
+    if (live.length < 2) return
+    await startCountdown(code)
   }, [code, room])
 
   const toggleCollision = useCallback(async () => {

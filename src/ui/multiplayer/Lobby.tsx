@@ -140,7 +140,11 @@ export function Lobby(props: LobbyProps) {
   const players = Object.values(room.players ?? {}).filter((p) => !isStale(p, now))
   const isHost = room.meta.host === user.uid
   const me = room.players[user.uid]
+  // Multiplayer braucht mindestens zwei (lebende) Spieler — allein gegen
+  // niemanden zu starten ergibt keinen Sinn.
+  const enoughPlayers = players.length >= 2
   const allReady = players.length > 0 && players.every((p) => p.ready)
+  const canStart = enoughPlayers && allReady
 
   return (
     <div className="overlay scrollable">
@@ -184,12 +188,13 @@ export function Lobby(props: LobbyProps) {
           {me?.ready ? 'Nicht bereit' : 'Bereit'}
         </button>
         {isHost && (
-          <button className="btn secondary" disabled={!allReady} onClick={onStart}>
+          <button className="btn secondary" disabled={!canStart} onClick={onStart}>
             Rennen starten
           </button>
         )}
       </div>
-      {isHost && !allReady && <div className="hint">Warten, bis alle bereit sind…</div>}
+      {isHost && !enoughPlayers && <div className="hint">Warte auf mindestens einen Mitspieler…</div>}
+      {isHost && enoughPlayers && !allReady && <div className="hint">Warten, bis alle bereit sind…</div>}
       {!isHost && <div className="hint">Der Host startet das Rennen.</div>}
 
       <button className="link-btn" onClick={onLeave}>
