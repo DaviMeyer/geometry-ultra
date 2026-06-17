@@ -496,6 +496,21 @@ textarea {
 }
 
 /* ---------- Multiplayer ---------- */
+.room-code-btn {
+  pointer-events: auto;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  display: block;
+  transition: transform 0.1s ease;
+}
+.room-code-btn:hover {
+  transform: scale(1.03);
+}
+.room-code-btn:active {
+  transform: scale(0.98);
+}
 .room-code {
   font-size: clamp(48px, 12vw, 96px);
   font-weight: 900;
@@ -595,6 +610,28 @@ textarea {
 .mp-ready.off {
   color: #8e80ad;
   background: rgba(255, 255, 255, 0.08);
+}
+.mp-kick {
+  pointer-events: auto;
+  cursor: pointer;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 46, 151, 0.5);
+  background: rgba(255, 46, 151, 0.12);
+  color: var(--neon-pink);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+}
+.mp-kick:hover {
+  background: var(--neon-pink);
+  color: #1a0010;
+  box-shadow: 0 0 12px rgba(255, 46, 151, 0.5);
 }
 
 /* Live-Rangliste während des Multiplayer-Rennens (oben mittig) */

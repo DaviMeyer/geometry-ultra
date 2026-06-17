@@ -159,10 +159,14 @@ export default function App() {
 
     const fire = () => {
       if (startedRef.current) return
-      startedRef.current = true
-      // Startaufstellung nebeneinander: eigener Index in stabil sortierter Liste
+      // Nicht ungefragt mitstarten: Wer beim Countdown-Start nicht "bereit" war
+      // (z.B. ein nach Hintergrund-Pause zurückkehrender Spieler, der aus der
+      // Bereit-Prüfung herausgefiltert wurde), wird nicht ins Rennen gezogen.
       const room = roomRef.current
       const me = userRef.current
+      if (me && room && !room.players[me.uid]?.ready) return
+      startedRef.current = true
+      // Startaufstellung nebeneinander: eigener Index in stabil sortierter Liste
       const ids = room ? Object.keys(room.players ?? {}).sort() : []
       const myIndex = me ? Math.max(0, ids.indexOf(me.uid)) : 0
       const n = ids.length || 1
@@ -279,6 +283,7 @@ export default function App() {
           onToggleReady={() => void mp.toggleReady()}
           onStart={() => void mp.start()}
           onToggleCollision={() => void mp.toggleCollision()}
+          onKick={(uid) => void mp.kick(uid)}
           onBack={() => setMpActive(false)}
         />
       )}

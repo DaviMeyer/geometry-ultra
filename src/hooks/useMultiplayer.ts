@@ -7,23 +7,30 @@
 // ===========================================================================
 
 import type { User } from 'firebase/auth'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ProgressState } from '../game/types'
 import {
   claimHost,
   createRoom,
   finishRace as mpFinishRace,
+  heartbeat,
+  isStale,
+  kickPlayer,
   pushProgress as mpPushProgress,
   getServerOffset,
   joinRoom,
   leaveRoom,
   resetRoom,
+  serverNow,
   setCollision,
   setReady,
   startCountdown,
   watchRoom,
   type RoomState,
 } from '../firebase/multiplayer'
+
+/** Wie oft wir ein Lebenszeichen senden (deutlich unter STALE_MS = 15 s). */
+const HEARTBEAT_MS = 5000
 
 export function useMultiplayer(user: User | null) {
   const [room, setRoom] = useState<RoomState | null>(null)
@@ -39,16 +46,69 @@ export function useMultiplayer(user: User | null) {
     return unsub
   }, [code])
 
-  // Host-Ausfall: Ist der eingetragene Host nicht mehr im Raum, übernimmt der
-  // (stabil) erste verbleibende Spieler — sonst könnte nie wieder jemand
-  // starten oder eine Revanche auslösen.
+  // Lebenszeichen senden, solange wir SICHTBAR in einem Raum sind. Macht die
+  // Abwesenheits-Erkennung (isStale) robust gegen unsaubere Verbindungsabbrüche,
+  // die onDisconnect verschläft. WICHTIG: nur bei sichtbarem Tab stempeln —
+  // ein in den Hintergrund geschobener Tab (Handy gesperrt, App gewechselt)
+  // drosselt setInterval zwar, stoppt es aber nicht; ohne diese Sperre würde der
+  // Heartbeat genau die Abwesenheit verschleiern, die er erkennen helfen soll.
+  // aliveRef wird beim Rauswurf synchron gelöscht, damit kein verspäteter Tick
+  // den gerade entfernten eigenen Knoten als Fragment wiederbelebt.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    if (!code || !user) return
+    aliveRef.current = true
+    const beat = () => {
+      if (aliveRef.current && document.visibilityState === 'visible') void heartbeat(code, user.uid)
+    }
+    beat()
+    const id = setInterval(beat, HEARTBEAT_MS)
+    document.addEventListener('visibilitychange', beat) // beim Zurückkehren sofort wieder anmelden
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', beat)
+    }
+  }, [code, user])
+
+  // Host-Ausfall: Ist der eingetragene Host nicht mehr (lebendig) im Raum,
+  // übernimmt der stabil erste verbleibende LEBENDE Spieler — sonst könnte nie
+  // wieder jemand starten oder eine Revanche auslösen. Veraltete Spieler (Tab
+  // zu, Verbindung weg) zählen dabei nicht mehr mit.
   useEffect(() => {
     if (!room || !user || !code) return
-    const ids = Object.keys(room.players ?? {}).sort()
-    if (!ids.includes(user.uid)) return
-    if (room.players[room.meta.host]) return // Host ist noch da
-    if (ids[0] !== user.uid) return // nur einer übernimmt
+    const now = serverNow()
+    const liveIds = Object.entries(room.players ?? {})
+      .filter(([, p]) => !isStale(p, now))
+      .map(([k]) => k)
+      .sort()
+    if (!liveIds.includes(user.uid)) return
+    const host = room.players[room.meta.host]
+    if (host && !isStale(host, now)) return // Host ist noch da
+    if (liveIds[0] !== user.uid) return // nur einer übernimmt
     void claimHost(code, user.uid)
+  }, [room, user, code])
+
+  // Rauswurf erkennen: Waren wir schon im Raum und ist unser Knoten plötzlich
+  // weg (Host hat uns gekickt), zurück ins Menü mit Hinweis. Eigenes Verlassen
+  // setzt code = null und löst das nicht aus (Effekt steigt vorher aus).
+  const wasMemberRef = useRef(false)
+  useEffect(() => {
+    if (!code || !user) {
+      wasMemberRef.current = false
+      return
+    }
+    if (!room) return // Raum (noch) nicht geladen oder ganz gelöscht
+    if (room.players[user.uid]) {
+      wasMemberRef.current = true
+      return
+    }
+    if (!wasMemberRef.current) return // wir waren noch nie drin -> kein Rauswurf
+    wasMemberRef.current = false
+    aliveRef.current = false // Heartbeat sofort stilllegen (kein Wiederbeleben des Knotens)
+    void leaveRoom(code, user.uid).catch(() => {}) // onDisconnect/Presence aufräumen
+    setCode(null)
+    setRoom(null)
+    setError('Du wurdest vom Host aus dem Raum entfernt.')
   }, [room, user, code])
 
   const create = useCallback(async () => {
@@ -116,6 +176,16 @@ export function useMultiplayer(user: User | null) {
     if (code && room) await setCollision(code, !room.meta.collision)
   }, [code, room])
 
+  const kick = useCallback(
+    async (targetUid: string) => {
+      if (!code || !user || !room) return
+      if (room.meta.host !== user.uid) return // nur der Host darf kicken
+      if (targetUid === user.uid) return // sich selbst nicht
+      await kickPlayer(code, targetUid).catch(() => {})
+    },
+    [code, user, room],
+  )
+
   const pushProgress = useCallback(
     (s: ProgressState) => {
       if (code && user) void mpPushProgress(code, user.uid, s)
@@ -140,5 +210,5 @@ export function useMultiplayer(user: User | null) {
     }
   }, [code])
 
-  return { room, code, offset, busy, error, create, join, leave, toggleReady, start, toggleCollision, pushProgress, finish, rematch }
+  return { room, code, offset, busy, error, create, join, leave, toggleReady, start, toggleCollision, kick, pushProgress, finish, rematch }
 }

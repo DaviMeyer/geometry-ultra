@@ -271,6 +271,25 @@ export async function setReady(code: string, uid: string, ready: boolean): Promi
   await update(ref(db(), `rooms/${code}/players/${uid}`), { ready }).catch(() => {})
 }
 
+/**
+ * Lebenszeichen: stempelt t serverseitig. Ergänzt onDisconnect — fällt eine
+ * Verbindung "unsauber" weg (Laptop schläft ein, Netz bricht ab, Tab wird hart
+ * gekillt), feuert onDisconnect oft verzögert oder gar nicht; über die laufenden
+ * Heartbeats erkennen die anderen Clients den Abgang via isStale trotzdem.
+ */
+export async function heartbeat(code: string, uid: string): Promise<void> {
+  await update(ref(db(), `rooms/${code}/players/${uid}`), { t: serverTimestamp() }).catch(() => {})
+}
+
+/**
+ * Host: wirft einen Spieler aus dem Raum. Die Rules erlauben dem Host das
+ * Löschen fremder Spieler-Knoten; der gekickte Client merkt am verschwundenen
+ * eigenen Knoten, dass er raus ist, und kehrt ins Menü zurück.
+ */
+export async function kickPlayer(code: string, uid: string): Promise<void> {
+  await remove(ref(db(), `rooms/${code}/players/${uid}`)).catch(() => {})
+}
+
 /** Host: schaltet den Kollisionsmodus (Bumper) für den Raum um. */
 export async function setCollision(code: string, on: boolean): Promise<void> {
   await update(ref(db(), `rooms/${code}/meta`), { collision: on })

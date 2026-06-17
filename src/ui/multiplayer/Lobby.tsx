@@ -3,7 +3,7 @@
 
 import type { User } from 'firebase/auth'
 import { useEffect, useState } from 'react'
-import type { RoomState } from '../../firebase/multiplayer'
+import { isStale, serverNow, type RoomState } from '../../firebase/multiplayer'
 import { Avatar } from '../Avatar'
 import { LoginButton } from '../LoginButton'
 
@@ -20,6 +20,7 @@ interface LobbyProps {
   onToggleReady: () => void
   onStart: () => void
   onToggleCollision: () => void
+  onKick: (uid: string) => void
   onBack: () => void
 }
 
@@ -40,9 +41,35 @@ function useCountdown(startAt: number | undefined, offset: number): number | nul
 }
 
 export function Lobby(props: LobbyProps) {
-  const { user, room, code, offset, busy, error, onCreate, onJoin, onLeave, onToggleReady, onStart, onToggleCollision, onBack } = props
+  const { user, room, code, offset, busy, error, onCreate, onJoin, onLeave, onToggleReady, onStart, onToggleCollision, onKick, onBack } = props
   const [joinCode, setJoinCode] = useState('')
+  const [copied, setCopied] = useState(false)
   const countdown = useCountdown(room?.meta.state === 'countdown' ? room.meta.startAt : undefined, offset)
+
+  const copyCode = async () => {
+    if (!code) return
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(code)
+      } else {
+        // Fallback für unsichere Kontexte / In-App-WebViews ohne Clipboard-API
+        const ta = document.createElement('textarea')
+        ta.value = code
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.focus()
+        ta.select()
+        const ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+        if (!ok) return
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Kopieren nicht möglich — Code steht weiterhin sichtbar zum Abtippen da
+    }
+  }
 
   // ----- nicht angemeldet -----
   if (!user) {
@@ -107,7 +134,10 @@ export function Lobby(props: LobbyProps) {
   }
 
   // ----- in der Lobby -----
-  const players = Object.values(room.players ?? {})
+  // Veraltete Spieler (Tab zu, Verbindung weg) ausblenden — sonst bleiben sie
+  // als Karteileichen sichtbar und blockieren "alle bereit".
+  const now = serverNow()
+  const players = Object.values(room.players ?? {}).filter((p) => !isStale(p, now))
   const isHost = room.meta.host === user.uid
   const me = room.players[user.uid]
   const allReady = players.length > 0 && players.every((p) => p.ready)
@@ -115,8 +145,10 @@ export function Lobby(props: LobbyProps) {
   return (
     <div className="overlay scrollable">
       <div className="subtitle">Raum-Code</div>
-      <div className="room-code">{code}</div>
-      <p className="hint">Teile den Code mit Freunden, damit sie beitreten können.</p>
+      <button className="room-code-btn" onClick={copyCode} title="Code kopieren">
+        <span className="room-code">{code}</span>
+      </button>
+      <p className="hint">{copied ? '✓ Code kopiert!' : 'Tippe auf den Code zum Kopieren und teile ihn mit Freunden.'}</p>
 
       <div className="panel mp-players">
         {players.map((p) => (
@@ -127,6 +159,11 @@ export function Lobby(props: LobbyProps) {
               {p.uid === room.meta.host && ' 👑'}
             </span>
             <span className={`mp-ready ${p.ready ? 'on' : 'off'}`}>{p.ready ? 'Bereit' : '…'}</span>
+            {isHost && p.uid !== user.uid && (
+              <button className="mp-kick" onClick={() => onKick(p.uid)} title={`${p.name} entfernen`} aria-label={`${p.name} entfernen`}>
+                ✕
+              </button>
+            )}
           </div>
         ))}
       </div>
